@@ -50,6 +50,8 @@ export interface UniqueCraftEvent {
   ownerTelegramUsername?: string; // Прямой юзернейм для написания в ЛС
   ownerTelegramUserId?: number;   // Числовой Telegram ID владельца
   isUpgradedOnProfile?: boolean; // Улучшен в профиле (есть прямой ник/контакт)
+  isChannel?: boolean;           // Улучшен каналом Telegram (а не личным профилем человека)
+  isOnGetgems?: boolean;         // Находится на портале / маркетплейсе Getgems
 
   // Статус и свежесть
   ageSec?: number;

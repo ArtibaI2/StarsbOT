@@ -47,6 +47,22 @@ export class Notifier {
         continue; // Filter out blind / anonymous blockchain-only exports
       }
 
+      // Check channel filter (channels vs personal profiles)
+      if (sub.filterChannels === 'ONLY_USERS' && craft.isChannel) {
+        continue; // Filtered out: user only wants personal user profiles
+      }
+      if (sub.filterChannels === 'ONLY_CHANNELS' && !craft.isChannel) {
+        continue; // Filtered out: user only wants channels
+      }
+
+      // Check Getgems portal filter
+      if (sub.filterGetgems === 'EXCLUDE_GETGEMS' && craft.isOnGetgems) {
+        continue; // Filtered out: user excludes Getgems portal
+      }
+      if (sub.filterGetgems === 'ONLY_GETGEMS' && !craft.isOnGetgems) {
+        continue; // Filtered out: user only wants Getgems portal
+      }
+
       // Check user's rarity filter
       if (sub.minRarity && sub.minRarity !== 'ALL' && craft.rarityLevel) {
         const order = ['COMMON', 'UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY'];
@@ -296,9 +312,14 @@ export class Notifier {
       lines.push(`📝 <i>${craft.description}</i>`);
     }
 
+    const ownerLabel = craft.isChannel ? '📢 <b>Канал (улучшивший):</b>' : '👤 <b>Ник улучшившего:</b>';
+
     lines.push('');
     lines.push(`📊 <b>Статус:</b> <code>${statusText}</code>`);
-    lines.push(`👤 <b>Ник улучшившего:</b> ${ownerDisplay}`);
+    lines.push(`${ownerLabel} ${ownerDisplay}`);
+    if (craft.isOnGetgems) {
+      lines.push(`💎 <b>Getgems:</b> Зафиксирован на портале`);
+    }
     lines.push(`🏛 <b>Платформы:</b> <a href="${tgNftUrl}">Telegram</a> • <a href="${mrktUrl}">MRKT (МКТ)</a> • <a href="${fragmentUrl}">Fragment</a>${craft.getgemsUrl ? ` • <a href="${craft.getgemsUrl}">Getgems</a>` : ''}`);
     lines.push('');
     if (craft.ageSec !== undefined) {

@@ -33,9 +33,11 @@ async function bootstrap() {
   try {
     await bot.api.setMyCommands([
       { command: 'start', description: 'Главное меню и статус' },
+      { command: 'settings', description: 'Настройки и фильтры (каналы, Getgems)' },
       { command: 'status', description: 'Статистика и аптайм' },
       { command: 'test', description: 'Отправить тестовое уведомление' },
-      { command: 'help', description: 'Справка' },
+      { command: 'admin', description: 'Панель администратора (только для админов)' },
+      { command: 'help', description: 'Справка по командам' },
     ]);
     console.log('✅ Telegram bot commands registered successfully.');
   } catch (err: any) {

@@ -17,7 +17,7 @@ const envSchema = z.object({
 
   // Intervals in seconds
   STORE_POLL_INTERVAL_SEC: z.coerce.number().default(30),
-  CRAFT_POLL_INTERVAL_SEC: z.coerce.number().default(4),
+  CRAFT_POLL_INTERVAL_SEC: z.coerce.number().default(3),
   MRKT_SYNC_INTERVAL_SEC: z.coerce.number().default(60),
 
   // MRKT Marketplace API Token
@@ -44,7 +44,7 @@ if (!parsed.success) {
 export const config = parsed.success ? parsed.data : {
   BOT_TOKEN: process.env.BOT_TOKEN || '',
   STORE_POLL_INTERVAL_SEC: 30,
-  CRAFT_POLL_INTERVAL_SEC: 4,
+  CRAFT_POLL_INTERVAL_SEC: 3,
   DATA_DIR: './data',
 } as z.infer<typeof envSchema>;
 

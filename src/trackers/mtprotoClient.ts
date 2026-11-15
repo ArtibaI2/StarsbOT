@@ -46,6 +46,7 @@ export class MtprotoService {
     userId?: number;
     firstName?: string;
     ownerAddress?: string;
+    isChannel?: boolean;
   } | null> {
     if (!this.client || !this.isConnected) return null;
 
@@ -60,8 +61,9 @@ export class MtprotoService {
       let username: string | undefined;
       let userId: number | undefined;
       let firstName: string | undefined;
+      let isChannel = false;
 
-      // 1. Check users array returned by Telegram
+      // 1. Check users array returned by Telegram (Personal Profiles)
       if (Array.isArray(res.users) && res.users.length > 0) {
         const u = res.users[0];
         if (u.username) {
@@ -75,7 +77,22 @@ export class MtprotoService {
         }
       }
 
-      // 2. Check gift.ownerName or gift.slug
+      // 2. Check chats array returned by Telegram (Channels)
+      if (Array.isArray(res.chats) && res.chats.length > 0) {
+        const c = res.chats[0];
+        isChannel = true;
+        if (c.username) {
+          username = c.username;
+        }
+        if (c.id) {
+          userId = -Math.abs(Number(c.id));
+        }
+        if (c.title) {
+          firstName = c.title;
+        }
+      }
+
+      // 3. Check gift.ownerName or gift.slug
       if (!username && gift?.ownerName) {
         if (gift.ownerName.startsWith('@')) {
           username = gift.ownerName.slice(1);
@@ -91,6 +108,7 @@ export class MtprotoService {
         userId,
         firstName,
         ownerAddress: gift?.ownerAddress,
+        isChannel,
       };
     } catch {
       return null;

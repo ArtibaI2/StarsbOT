@@ -4,6 +4,13 @@ import { UserSubscription, BotStatistics } from '../types/user.js';
 import { TelegramGift } from '../types/gift.js';
 import { resolvedDataDir } from '../config/config.js';
 
+export const ADMIN_IDS = [6965669923, 8230668674, 6175753245];
+
+export function isAdmin(userId?: number | string): boolean {
+  if (!userId) return false;
+  return ADMIN_IDS.includes(Number(userId));
+}
+
 interface DatabaseSchema {
   subscribers: Record<string, UserSubscription>;
   knownGifts: Record<string, TelegramGift>;
@@ -11,6 +18,7 @@ interface DatabaseSchema {
   seenListingIds: string[]; // Store last N seen sale listing IDs
   isCraftBaselineInitialized?: boolean;
   isListingBaselineInitialized?: boolean;
+  subscriptionSystemEnabled?: boolean; // Global subscription mode toggle
   walletMappings?: Record<string, { username: string; source: string; updatedAt: string }>;
   stats: {
     totalUpgradeEventsSent: number;
@@ -30,6 +38,7 @@ const DEFAULT_DB: DatabaseSchema = {
   seenListingIds: [],
   isCraftBaselineInitialized: false,
   isListingBaselineInitialized: false,
+  subscriptionSystemEnabled: false,
   walletMappings: {},
   stats: {
     totalUpgradeEventsSent: 0,
@@ -43,7 +52,6 @@ export class Database {
   private filePath: string;
   private data: DatabaseSchema;
   private saveTimeout: NodeJS.Timeout | null = null;
-  private isWriting = false;
 
   constructor() {
     if (!fs.existsSync(resolvedDataDir)) {
@@ -65,6 +73,7 @@ export class Database {
           knownGifts: parsed.knownGifts || {},
           seenCraftIds: parsed.seenCraftIds || [],
           seenListingIds: parsed.seenListingIds || [],
+          subscriptionSystemEnabled: Boolean(parsed.subscriptionSystemEnabled),
           stats: {
             ...DEFAULT_DB.stats,
             ...(parsed.stats || {}),
@@ -103,10 +112,88 @@ export class Database {
     }, 500);
   }
 
+  // --- Subscription System & Access Control ---
+
+  public isSubscriptionSystemEnabled(): boolean {
+    return Boolean(this.data.subscriptionSystemEnabled);
+  }
+
+  public setSubscriptionSystemEnabled(enabled: boolean): void {
+    this.data.subscriptionSystemEnabled = enabled;
+    this.scheduleSave();
+  }
+
+  public hasActiveSubscription(chatId: number): boolean {
+    // 1. Admins ALWAYS have unlimited access
+    if (isAdmin(chatId)) return true;
+
+    // 2. If subscription system is disabled, all active users have access
+    if (!this.data.subscriptionSystemEnabled) return true;
+
+    // 3. Check user record
+    const key = chatId.toString();
+    const sub = this.data.subscribers[key];
+    if (!sub) return false;
+
+    if (sub.subscriptionExpiresAt === 'forever') return true;
+    if (!sub.subscriptionExpiresAt) return false;
+
+    return new Date(sub.subscriptionExpiresAt).getTime() > Date.now();
+  }
+
+  public grantSubscription(chatId: number, durationDays?: number): void {
+    const key = chatId.toString();
+    let expiresAt: string;
+    if (!durationDays || durationDays <= 0) {
+      expiresAt = 'forever';
+    } else {
+      const curExp = this.data.subscribers[key]?.subscriptionExpiresAt;
+      const base = (curExp && curExp !== 'forever' && new Date(curExp).getTime() > Date.now())
+        ? new Date(curExp).getTime()
+        : Date.now();
+      expiresAt = new Date(base + durationDays * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    if (this.data.subscribers[key]) {
+      this.data.subscribers[key].isSubscribed = true;
+      this.data.subscribers[key].subscriptionExpiresAt = expiresAt;
+      this.data.subscribers[key].updatedAt = new Date().toISOString();
+    } else {
+      this.data.subscribers[key] = {
+        chatId,
+        userId: chatId,
+        notifyUpgrades: true,
+        notifyCrafts: true,
+        notifyListings: false,
+        onlyProfileUpgrades: true,
+        isSubscribed: true,
+        subscriptionExpiresAt: expiresAt,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isBlocked: false,
+      };
+    }
+    this.scheduleSave();
+  }
+
+  public revokeSubscription(chatId: number): void {
+    const key = chatId.toString();
+    if (this.data.subscribers[key]) {
+      this.data.subscribers[key].isSubscribed = false;
+      delete this.data.subscribers[key].subscriptionExpiresAt;
+      this.data.subscribers[key].updatedAt = new Date().toISOString();
+      this.scheduleSave();
+    }
+  }
+
   // --- Subscribers ---
 
   public getSubscriber(chatId: number): UserSubscription | undefined {
     return this.data.subscribers[chatId.toString()];
+  }
+
+  public getAllSubscribers(): UserSubscription[] {
+    return Object.values(this.data.subscribers);
   }
 
   public upsertSubscriber(sub: Omit<UserSubscription, 'createdAt' | 'updatedAt' | 'isBlocked'>): UserSubscription {
@@ -121,13 +208,15 @@ export class Database {
         notifyCrafts: true,
         notifyListings: true,
         onlyProfileUpgrades: true,
+        filterChannels: 'ALL',
+        filterGetgems: 'ALL',
         maxListingPriceTon: undefined,
         minRarity: 'ALL',
         isBlocked: false,
       }),
       ...sub,
       updatedAt: now,
-      isBlocked: false, // active on /start
+      isBlocked: false,
     };
 
     this.data.subscribers[key] = updated;
@@ -137,7 +226,7 @@ export class Database {
 
   public updatePreferences(
     chatId: number,
-    partial: Partial<Pick<UserSubscription, 'notifyUpgrades' | 'notifyCrafts' | 'notifyListings' | 'maxListingPriceTon' | 'minRarity'>>
+    partial: Partial<Pick<UserSubscription, 'notifyUpgrades' | 'notifyCrafts' | 'notifyListings' | 'onlyProfileUpgrades' | 'filterChannels' | 'filterGetgems' | 'maxListingPriceTon' | 'minRarity'>>
   ): UserSubscription | undefined {
     const key = chatId.toString();
     const existing = this.data.subscribers[key];
@@ -159,16 +248,20 @@ export class Database {
 
   public getActiveSubscribers(type?: 'upgrades' | 'crafts' | 'listings'): UserSubscription[] {
     const all = Object.values(this.data.subscribers).filter((s) => !s.isBlocked);
+    const subFiltered = this.data.subscriptionSystemEnabled
+      ? all.filter((s) => this.hasActiveSubscription(s.chatId))
+      : all;
+
     if (type === 'upgrades') {
-      return all.filter((s) => s.notifyUpgrades);
+      return subFiltered.filter((s) => s.notifyUpgrades);
     }
     if (type === 'crafts') {
-      return all.filter((s) => s.notifyCrafts);
+      return subFiltered.filter((s) => s.notifyCrafts);
     }
     if (type === 'listings') {
-      return all.filter((s) => s.notifyListings);
+      return subFiltered.filter((s) => s.notifyListings);
     }
-    return all;
+    return subFiltered;
   }
 
   // --- Known Gifts Cache ---
@@ -209,8 +302,8 @@ export class Database {
   public markCraftSeen(craftId: string): void {
     if (!this.data.seenCraftIds.includes(craftId)) {
       this.data.seenCraftIds.push(craftId);
-      if (this.data.seenCraftIds.length > 10000) {
-        this.data.seenCraftIds = this.data.seenCraftIds.slice(-8000);
+      if (this.data.seenCraftIds.length > 15000) {
+        this.data.seenCraftIds = this.data.seenCraftIds.slice(-10000);
       }
       this.scheduleSave();
     }
@@ -293,8 +386,13 @@ export class Database {
   public getStatistics(): BotStatistics {
     const subs = Object.values(this.data.subscribers);
     const active = subs.filter((s) => !s.isBlocked);
+    const paid = subs.filter((s) => this.hasActiveSubscription(s.chatId) && !isAdmin(s.chatId));
+
     return {
       totalSubscribers: subs.length,
+      activeSubscribersCount: active.length,
+      paidSubscribersCount: paid.length,
+      subscriptionSystemEnabled: Boolean(this.data.subscriptionSystemEnabled),
       activeUpgradesSubscribers: active.filter((s) => s.notifyUpgrades).length,
       activeCraftsSubscribers: active.filter((s) => s.notifyCrafts).length,
       activeListingsSubscribers: active.filter((s) => s.notifyListings).length,

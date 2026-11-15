@@ -16,8 +16,8 @@ export class CraftStreamTracker {
   private onCraftCallbacks: CraftEventCallback[] = [];
   private botStartedAtSec = Math.floor(Date.now() / 1000);
 
-  constructor(intervalSec = 4, tonApiKey?: string) {
-    this.intervalSec = Math.max(3, intervalSec);
+  constructor(intervalSec = 3, tonApiKey?: string) {
+    this.intervalSec = Math.max(2, intervalSec);
     this.tonApiKey = tonApiKey;
   }
 
@@ -91,8 +91,8 @@ export class CraftStreamTracker {
       const eventTimestamp = Number(ev.timestamp || 0);
       const ageSec = Math.max(0, nowSec - eventTimestamp);
 
-      // 1. STRICT LATENCY FILTER: Discard any events older than 60 seconds (outdated)
-      if (ageSec > 60) {
+      // 1. STRICT LATENCY FILTER: Discard any events older than 35 seconds (prevents notifying about already sold items)
+      if (ageSec > 35) {
         db.markCraftSeen(eventId);
         continue;
       }
@@ -240,6 +240,17 @@ export class CraftStreamTracker {
         (ownerResolution.displayName && !ownerResolution.displayName.startsWith('UQ') && !ownerResolution.displayName.includes('...'))
       );
 
+      const isChannel = Boolean(
+        ownerResolution.isChannel ||
+        (ownerResolution.telegramUserId && ownerResolution.telegramUserId < 0)
+      );
+
+      const isOnGetgems = Boolean(
+        ownerResolution.displayName?.toLowerCase().includes('getgems') ||
+        senderAddress?.toLowerCase().includes('getgems') ||
+        (effectiveTonviewer && effectiveTonviewer.toLowerCase().includes('getgems'))
+      );
+
       let marketStatus: 'FOR_SALE' | 'ON_PROFILE' | 'JUST_MINTED' = 'JUST_MINTED';
       if (ownerResolution.isForSale) {
         marketStatus = 'FOR_SALE';
@@ -263,6 +274,8 @@ export class CraftStreamTracker {
         ownerTelegramUsername,
         ownerTelegramUserId: ownerResolution.telegramUserId,
         isUpgradedOnProfile,
+        isChannel,
+        isOnGetgems,
         ageSec,
         marketStatus,
         platformName: 'Telegram / MRKT / Fragment',
@@ -294,6 +307,7 @@ export class CraftStreamTracker {
     telegramUserId?: number;
     isSold: boolean;
     isForSale: boolean;
+    isChannel?: boolean;
   }> {
     let isSold = false;
     let isForSale = false;
@@ -342,6 +356,7 @@ export class CraftStreamTracker {
         isRealName: true,
         isSold,
         isForSale,
+        isChannel: Boolean(mtprotoInfo.isChannel),
       };
     }
 
