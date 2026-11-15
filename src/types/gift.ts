@@ -51,6 +51,11 @@ export interface UniqueCraftEvent {
   ownerTelegramUserId?: number;   // Числовой Telegram ID владельца
   isUpgradedOnProfile?: boolean; // Улучшен в профиле (есть прямой ник/контакт)
 
+  // Статус и свежесть
+  ageSec?: number;
+  marketStatus?: 'FOR_SALE' | 'ON_PROFILE' | 'JUST_MINTED';
+  salePriceTon?: number;
+
   // Ссылки на все доступные платформы
   platformName: string;
   platformUrl: string;

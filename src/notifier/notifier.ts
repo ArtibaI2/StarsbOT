@@ -272,6 +272,10 @@ export class Notifier {
     const mrktUrl = craft.mrktUrl || 'https://t.me/mrkt';
     const fragmentUrl = craft.fragmentUrl || craft.platformUrl;
 
+    const statusText = craft.marketStatus === 'FOR_SALE'
+      ? '🟢 В продаже на Fragment'
+      : (craft.marketStatus === 'ON_PROFILE' ? '👤 Находится в профиле Telegram' : '⚡️ Свежий апгрейд в сети');
+
     const lines = [
       `🎁 <b>ПОДАРОК УЛУЧШЕН!</b>`,
       '',
@@ -293,9 +297,13 @@ export class Notifier {
     }
 
     lines.push('');
+    lines.push(`📊 <b>Статус:</b> <code>${statusText}</code>`);
     lines.push(`👤 <b>Ник улучшившего:</b> ${ownerDisplay}`);
     lines.push(`🏛 <b>Платформы:</b> <a href="${tgNftUrl}">Telegram</a> • <a href="${mrktUrl}">MRKT (МКТ)</a> • <a href="${fragmentUrl}">Fragment</a>${craft.getgemsUrl ? ` • <a href="${craft.getgemsUrl}">Getgems</a>` : ''}`);
     lines.push('');
+    if (craft.ageSec !== undefined) {
+      lines.push(`⚡️ <i>Задержка: ~${craft.ageSec} сек. назад (Real-Time)</i>`);
+    }
     lines.push(`🕒 <i>Зафиксировано в ${timeStr} MSK</i>`);
 
     return lines.join('\n');
