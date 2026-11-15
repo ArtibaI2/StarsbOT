@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: starsbot
+    env: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: PORT
+        value: 8080
+      - key: CRAFT_POLL_INTERVAL_SEC
+        value: 5
+
