@@ -2,6 +2,7 @@ import axios from 'axios';
 import { db } from '../storage/database.js';
 import { UniqueCraftEvent } from '../types/gift.js';
 import { mtprotoService } from './mtprotoClient.js';
+import { isGetgemsSale, newestFirst } from './marketplace.js';
 
 export type CraftEventCallback = (craft: UniqueCraftEvent) => Promise<void>;
 
@@ -163,24 +164,21 @@ export class CraftStreamTracker {
     }
 
     // Enrich candidates in parallel for lightning speed (< 1.5s total)
-    const enrichedResults = await Promise.all(
-      candidates.map((c) =>
-        this.enrichGiftDetails(
+    const processing = newestFirst(candidates).map(async (c) => {
+      const upgrade = await this.enrichGiftDetails(
           c.tokenName,
           c.collectionName,
           c.senderAddress,
           c.timestamp,
           c.nftItemAddress,
           c.ageSec
-        )
-      )
-    );
+      );
+      if (upgrade) await this.emitCraft(upgrade);
+    });
 
-    // Emit valid newly upgraded gifts in chronological order (oldest first)
-    const validUpgrades = enrichedResults.filter((u): u is UniqueCraftEvent => u !== null);
-    for (const upgrade of validUpgrades.reverse()) {
-      await this.emitCraft(upgrade);
-    }
+    // Let each event notify as soon as its own enrichment completes; one slow lookup
+    // no longer holds every other fresh upgrade in the batch.
+    await Promise.allSettled(processing);
   }
 
   /**
@@ -199,9 +197,10 @@ export class CraftStreamTracker {
       const metaUrl = `https://nft.fragment.com/gift/${tokenName}.json`;
 
       // Parallel execution: Metadata + Owner & Fragment Status
-      const [metaRes, ownerResolution] = await Promise.all([
+      const [metaRes, ownerResolution, isGetgemsListed] = await Promise.all([
         axios.get(metaUrl, { timeout: 3500 }).catch(() => ({ data: {} })),
         this.resolveOwnerAndFragmentStatus(tokenName, senderAddress),
+        this.fetchIsGetgemsListed(nftItemAddress),
       ]);
 
       // If the collectible is already SOLD on Fragment and NOT on a user profile, DISCARD IT!
@@ -245,7 +244,7 @@ export class CraftStreamTracker {
         (ownerResolution.telegramUserId && ownerResolution.telegramUserId < 0)
       );
 
-      const isOnGetgems = Boolean(
+      const isOnGetgems = isGetgemsListed || Boolean(
         ownerResolution.displayName?.toLowerCase().includes('getgems') ||
         senderAddress?.toLowerCase().includes('getgems') ||
         (effectiveTonviewer && effectiveTonviewer.toLowerCase().includes('getgems'))
@@ -290,6 +289,23 @@ export class CraftStreamTracker {
     } catch (err: any) {
       console.warn(`⚠️ [UpgradeStream] Error enriching ${tokenName}:`, err?.message || err);
       return null;
+    }
+  }
+
+  private async fetchIsGetgemsListed(nftItemAddress?: string): Promise<boolean> {
+    if (!nftItemAddress || !db.hasActiveGetgemsFilters()) return false;
+
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (this.tonApiKey) headers.Authorization = `Bearer ${this.tonApiKey}`;
+
+    try {
+      const res = await axios.get(
+        `https://tonapi.io/v2/nfts/${encodeURIComponent(nftItemAddress)}`,
+        { headers, timeout: 1200 }
+      );
+      return isGetgemsSale(res.data);
+    } catch {
+      return false;
     }
   }
 
@@ -406,11 +422,16 @@ export class CraftStreamTracker {
 
     // 4. Reverse TON DNS / TonAPI fallback
     if (rawAddress) {
-      try {
-        const dnsRes = await axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(rawAddress)}/dns/backresolve`, {
+      const dnsPromise = axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(rawAddress)}/dns/backresolve`, {
           timeout: 2000,
-        });
-        const domains = dnsRes.data?.domains;
+        }).catch(() => null);
+      const parsePromise = axios.get(`https://tonapi.io/v2/address/${encodeURIComponent(rawAddress)}/parse`, {
+          timeout: 2000,
+        }).catch(() => null);
+
+      try {
+        const dnsRes = await dnsPromise;
+        const domains = dnsRes?.data?.domains;
         if (Array.isArray(domains) && domains.length > 0) {
           const dom = domains[0].trim();
           const clean = dom.replace(/\.(ton|t\.me)$/i, '');
@@ -429,10 +450,8 @@ export class CraftStreamTracker {
       } catch {}
 
       try {
-        const parseRes = await axios.get(`https://tonapi.io/v2/address/${encodeURIComponent(rawAddress)}/parse`, {
-          timeout: 2000,
-        });
-        const uq = parseRes.data?.non_bounceable?.b64url;
+        const parseRes = await parsePromise;
+        const uq = parseRes?.data?.non_bounceable?.b64url;
         if (uq) {
           return {
             displayName: `${uq.slice(0, 6)}...${uq.slice(-4)}`,

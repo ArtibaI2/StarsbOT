@@ -1,9 +1,12 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import { db } from '../storage/database.js';
 import { GiftListingEvent, GiftUpgradeEvent, TelegramGift, UniqueCraftEvent } from '../types/gift.js';
+import { matchesCraftFilters } from './craftFilters.js';
+import { SendPacer } from './sendPacer.js';
 
 export class Notifier {
   private bot: Bot;
+  private readonly sendPacer = new SendPacer(35);
 
   constructor(bot: Bot) {
     this.bot = bot;
@@ -19,13 +22,10 @@ export class Notifier {
     const text = this.formatUpgradeMessage(event, gift);
     const keyboard = this.buildUpgradeKeyboard(event, gift);
 
-    let sentCount = 0;
-    for (const sub of subscribers) {
-      const ok = await this.sendSafeMessage(sub.chatId, text, keyboard);
-      if (ok) sentCount++;
-      // Polite rate limit ~35 ms delay
-      await new Promise((r) => setTimeout(r, 35));
-    }
+    const sentResults = await Promise.all(subscribers.map((sub) =>
+      this.sendPacer.run(() => this.sendSafeMessage(sub.chatId, text, keyboard))
+    ));
+    const sentCount = sentResults.filter(Boolean).length;
 
     db.incrementSentStats('upgrades', sentCount);
   }
@@ -40,43 +40,11 @@ export class Notifier {
     const text = this.formatCraftMessage(craft);
     const keyboard = this.buildCraftKeyboard(craft);
 
-    let sentCount = 0;
-    for (const sub of subscribers) {
-      // Check if user wants only gifts upgraded on profile (with username/contact)
-      if (sub.onlyProfileUpgrades !== false && !craft.isUpgradedOnProfile && !craft.ownerTelegramUsername) {
-        continue; // Filter out blind / anonymous blockchain-only exports
-      }
-
-      // Check channel filter (channels vs personal profiles)
-      if (sub.filterChannels === 'ONLY_USERS' && craft.isChannel) {
-        continue; // Filtered out: user only wants personal user profiles
-      }
-      if (sub.filterChannels === 'ONLY_CHANNELS' && !craft.isChannel) {
-        continue; // Filtered out: user only wants channels
-      }
-
-      // Check Getgems portal filter
-      if (sub.filterGetgems === 'EXCLUDE_GETGEMS' && craft.isOnGetgems) {
-        continue; // Filtered out: user excludes Getgems portal
-      }
-      if (sub.filterGetgems === 'ONLY_GETGEMS' && !craft.isOnGetgems) {
-        continue; // Filtered out: user only wants Getgems portal
-      }
-
-      // Check user's rarity filter
-      if (sub.minRarity && sub.minRarity !== 'ALL' && craft.rarityLevel) {
-        const order = ['COMMON', 'UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY'];
-        const userMinIdx = order.indexOf(sub.minRarity);
-        const craftIdx = order.indexOf(craft.rarityLevel.toUpperCase());
-        if (craftIdx < userMinIdx) {
-          continue; // Filtered out by user preferences
-        }
-      }
-
-      const ok = await this.sendSafePhotoOrMessage(sub.chatId, craft.imageUrl, text, keyboard);
-      if (ok) sentCount++;
-      await new Promise((r) => setTimeout(r, 35));
-    }
+    const eligible = subscribers.filter((sub) => matchesCraftFilters(sub, craft));
+    const sentResults = await Promise.all(eligible.map((sub) =>
+      this.sendPacer.run(() => this.sendSafePhotoOrMessage(sub.chatId, craft.imageUrl, text, keyboard))
+    ));
+    const sentCount = sentResults.filter(Boolean).length;
 
     db.incrementSentStats('crafts', sentCount);
   }
@@ -91,17 +59,13 @@ export class Notifier {
     const text = this.formatListingMessage(listing);
     const keyboard = this.buildListingKeyboard(listing);
 
-    let sentCount = 0;
-    for (const sub of subscribers) {
-      // Check user's price filter
-      if (sub.maxListingPriceTon !== undefined && listing.priceTon > sub.maxListingPriceTon) {
-        continue; // Price higher than user's limit
-      }
-
-      const ok = await this.sendSafePhotoOrMessage(sub.chatId, listing.imageUrl, text, keyboard);
-      if (ok) sentCount++;
-      await new Promise((r) => setTimeout(r, 35));
-    }
+    const eligible = subscribers.filter((sub) =>
+      sub.maxListingPriceTon === undefined || listing.priceTon <= sub.maxListingPriceTon
+    );
+    const sentResults = await Promise.all(eligible.map((sub) =>
+      this.sendPacer.run(() => this.sendSafePhotoOrMessage(sub.chatId, listing.imageUrl, text, keyboard))
+    ));
+    const sentCount = sentResults.filter(Boolean).length;
 
     db.incrementSentStats('listings', sentCount);
   }

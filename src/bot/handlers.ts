@@ -7,18 +7,19 @@ export function setupHandlers(bot: any, notifier: Notifier): void {
   bot.command('start', async (ctx: Context) => {
     if (!ctx.chat || !ctx.from) return;
 
+    const existing = db.getSubscriber(ctx.chat.id);
     const user = db.upsertSubscriber({
       chatId: ctx.chat.id,
       userId: ctx.from.id,
       username: ctx.from.username,
       firstName: ctx.from.first_name,
-      notifyUpgrades: true,
-      notifyCrafts: true,
-      notifyListings: false,
-      onlyProfileUpgrades: true,
-      filterChannels: 'ALL',
-      filterGetgems: 'ALL',
-      minRarity: 'ALL',
+      notifyUpgrades: existing?.notifyUpgrades ?? true,
+      notifyCrafts: existing?.notifyCrafts ?? true,
+      notifyListings: existing?.notifyListings ?? false,
+      onlyProfileUpgrades: existing?.onlyProfileUpgrades ?? true,
+      filterChannels: existing?.filterChannels ?? 'ALL',
+      filterGetgems: existing?.filterGetgems ?? 'ALL',
+      minRarity: existing?.minRarity ?? 'ALL',
     });
 
     const isUserAdmin = isAdmin(ctx.from.id);

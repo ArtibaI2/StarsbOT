@@ -3,13 +3,8 @@ import path from 'path';
 import { UserSubscription, BotStatistics } from '../types/user.js';
 import { TelegramGift } from '../types/gift.js';
 import { resolvedDataDir } from '../config/config.js';
-
-export const ADMIN_IDS = [6965669923, 8230668674, 6175753245];
-
-export function isAdmin(userId?: number | string): boolean {
-  if (!userId) return false;
-  return ADMIN_IDS.includes(Number(userId));
-}
+import { hasSubscriptionAccess, isAdmin } from './access.js';
+export { ADMIN_IDS, isAdmin } from './access.js';
 
 interface DatabaseSchema {
   subscribers: Record<string, UserSubscription>;
@@ -124,21 +119,11 @@ export class Database {
   }
 
   public hasActiveSubscription(chatId: number): boolean {
-    // 1. Admins ALWAYS have unlimited access
-    if (isAdmin(chatId)) return true;
-
-    // 2. If subscription system is disabled, all active users have access
-    if (!this.data.subscriptionSystemEnabled) return true;
-
-    // 3. Check user record
-    const key = chatId.toString();
-    const sub = this.data.subscribers[key];
-    if (!sub) return false;
-
-    if (sub.subscriptionExpiresAt === 'forever') return true;
-    if (!sub.subscriptionExpiresAt) return false;
-
-    return new Date(sub.subscriptionExpiresAt).getTime() > Date.now();
+    return hasSubscriptionAccess(
+      chatId,
+      Boolean(this.data.subscriptionSystemEnabled),
+      this.data.subscribers[chatId.toString()]
+    );
   }
 
   public grantSubscription(chatId: number, durationDays?: number): void {
@@ -262,6 +247,12 @@ export class Database {
       return subFiltered.filter((s) => s.notifyListings);
     }
     return subFiltered;
+  }
+
+  public hasActiveGetgemsFilters(): boolean {
+    return this.getActiveSubscribers('crafts').some(
+      (subscriber) => subscriber.filterGetgems === 'EXCLUDE_GETGEMS' || subscriber.filterGetgems === 'ONLY_GETGEMS'
+    );
   }
 
   // --- Known Gifts Cache ---
