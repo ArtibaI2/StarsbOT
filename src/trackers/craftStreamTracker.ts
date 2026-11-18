@@ -1,10 +1,24 @@
+import https from 'https';
 import axios from 'axios';
 import { db } from '../storage/database.js';
 import { UniqueCraftEvent } from '../types/gift.js';
-import { mtprotoService } from './mtprotoClient.js';
+import { mtprotoService, MtprotoGiftDetails } from './mtprotoClient.js';
 import { isGetgemsSale, newestFirst } from './marketplace.js';
 
 export type CraftEventCallback = (craft: UniqueCraftEvent) => Promise<void>;
+
+// High-performance HTTPS agent with Keep-Alive to eliminate TLS handshake latency
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 50,
+});
+
+const DEFAULT_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'ru,en;q=0.9',
+};
 
 // The official Fragment Gift Minter contract that processes EVERY Telegram gift upgrade
 const FRAGMENT_GIFT_MINTER_ADDRESS = '0:158136239adb15dd59df90c641f9efd312cfeb8664f218f4c3e5fce9d95e6c07';
@@ -49,7 +63,12 @@ export class CraftStreamTracker {
       db.updateLastCheck('craft');
       await this.pollMinterEvents();
     } catch (err: any) {
-      console.error('⚠️ [UpgradeStream] Polling error:', err?.message || err);
+      if (err?.response?.status === 429) {
+        console.warn('⚠️ [UpgradeStream] TonAPI rate limit (429). Applying 6s smart backoff...');
+        await new Promise((r) => setTimeout(r, 6000));
+      } else {
+        console.error('⚠️ [UpgradeStream] Polling error:', err?.message || err);
+      }
     } finally {
       this.isChecking = false;
     }
@@ -61,6 +80,7 @@ export class CraftStreamTracker {
    */
   private async pollMinterEvents(): Promise<void> {
     const headers: Record<string, string> = {
+      ...DEFAULT_HEADERS,
       Accept: 'application/json',
     };
     if (this.tonApiKey) {
@@ -68,7 +88,7 @@ export class CraftStreamTracker {
     }
 
     const url = `https://tonapi.io/v2/accounts/${FRAGMENT_GIFT_MINTER_ADDRESS}/events?limit=30`;
-    const res = await axios.get(url, { headers, timeout: 6000 });
+    const res = await axios.get(url, { headers, timeout: 6000, httpsAgent });
     const events = res.data?.events || [];
 
     const nowSec = Math.floor(Date.now() / 1000);
@@ -198,7 +218,7 @@ export class CraftStreamTracker {
 
       // Parallel execution: Metadata + Owner & Fragment Status
       const [metaRes, ownerResolution, isGetgemsListed] = await Promise.all([
-        axios.get(metaUrl, { timeout: 3500 }).catch(() => ({ data: {} })),
+        axios.get(metaUrl, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent }).catch(() => ({ data: {} })),
         this.resolveOwnerAndFragmentStatus(tokenName, senderAddress),
         this.fetchIsGetgemsListed(nftItemAddress),
       ]);
@@ -210,21 +230,50 @@ export class CraftStreamTracker {
 
       const meta = metaRes.data || {};
       const attributes = Array.isArray(meta.attributes) ? meta.attributes : [];
-      const getAttr = (name: string): string => {
+      const getAttr = (name: string): { value: string; rarity?: string } => {
         const found = attributes.find(
           (a: any) => (a.trait_type || '').toLowerCase() === name.toLowerCase()
         );
-        return found ? String(found.value || '') : '';
+        if (!found) return { value: '' };
+        let rarity = found.rarity ? String(found.rarity) : undefined;
+        if (!rarity && found.rarity_percentage) {
+          rarity = `${found.rarity_percentage}%`;
+        }
+        return { value: String(found.value || ''), rarity };
       };
 
-      const modelName = getAttr('Model') || 'Classic';
-      const backdropName = getAttr('Backdrop');
-      const symbolName = getAttr('Symbol') || getAttr('Pattern');
+      const metaModel = getAttr('Model');
+      const metaBackdrop = getAttr('Backdrop');
+      const metaSymbol = getAttr('Symbol').value ? getAttr('Symbol') : getAttr('Pattern');
 
-      let num = 0;
-      const numMatch = (meta.name || tokenName).match(/#?\s*(\d+)$/);
-      if (numMatch) {
-        num = parseInt(numMatch[1], 10);
+      const modelName = ownerResolution.mtprotoInfo?.modelName || metaModel.value || 'Classic';
+      const modelRarity = ownerResolution.mtprotoInfo?.modelRarity || metaModel.rarity;
+
+      const backdropName = ownerResolution.mtprotoInfo?.backdropName || metaBackdrop.value || undefined;
+      const backdropRarity = ownerResolution.mtprotoInfo?.backdropRarity || metaBackdrop.rarity;
+
+      const symbolName = ownerResolution.mtprotoInfo?.symbolName || metaSymbol.value || undefined;
+      const symbolRarity = ownerResolution.mtprotoInfo?.symbolRarity || metaSymbol.rarity;
+
+      let num = ownerResolution.mtprotoInfo?.num || 0;
+      if (!num) {
+        const numMatch = (meta.name || tokenName).match(/#?\s*(\d+)$/);
+        if (numMatch) {
+          num = parseInt(numMatch[1], 10);
+        }
+      }
+
+      // Calculate Rarity Level based on model rarity percentage
+      let rarityLevel: 'Common' | 'Uncommon' | 'Rare' | 'Epic' | 'Legendary' | undefined;
+      if (modelRarity) {
+        const numRarity = parseFloat(modelRarity.replace('%', ''));
+        if (!isNaN(numRarity)) {
+          if (numRarity <= 0.5) rarityLevel = 'Legendary';
+          else if (numRarity <= 2.0) rarityLevel = 'Epic';
+          else if (numRarity <= 6.0) rarityLevel = 'Rare';
+          else if (numRarity <= 15.0) rarityLevel = 'Uncommon';
+          else rarityLevel = 'Common';
+        }
       }
 
       const ownerTelegramUsername = ownerResolution.telegramUsername;
@@ -262,8 +311,12 @@ export class CraftStreamTracker {
         giftTitle: collectionName || meta.name || 'Telegram Gift',
         num,
         modelName,
+        modelRarity,
         backdropName: backdropName || undefined,
+        backdropRarity,
         symbolName: symbolName || undefined,
+        symbolRarity,
+        rarityLevel,
         description: meta.description,
         imageUrl: meta.image || `https://nft.fragment.com/gift/${tokenName}.webp`,
         lottieUrl: meta.lottie,
@@ -324,13 +377,14 @@ export class CraftStreamTracker {
     isForSale: boolean;
     isChannel?: boolean;
     isProfileActive: boolean;
+    mtprotoInfo?: MtprotoGiftDetails | null;
   }> {
     let isSold = false;
     let isForSale = false;
 
     // Check Fragment HTML and MTProto in parallel for minimum latency
     const [fragRes, mtprotoInfo] = await Promise.all([
-      axios.get(`https://fragment.com/gift/${tokenName}`, { timeout: 2500 }).catch(() => null),
+      axios.get(`https://fragment.com/gift/${tokenName}`, { headers: DEFAULT_HEADERS, timeout: 2500, httpsAgent }).catch(() => null),
       mtprotoService.getUniqueStarGift(tokenName).catch(() => null),
     ]);
 
@@ -374,6 +428,7 @@ export class CraftStreamTracker {
         isForSale,
         isChannel: Boolean(mtprotoInfo.isChannel),
         isProfileActive: true,
+        mtprotoInfo,
       };
     }
 
@@ -388,6 +443,7 @@ export class CraftStreamTracker {
           isSold,
           isForSale,
           isProfileActive: false,
+          mtprotoInfo,
         };
       }
     }
@@ -420,16 +476,21 @@ export class CraftStreamTracker {
         isSold,
         isForSale,
         isProfileActive: false,
+        mtprotoInfo,
       };
     }
 
     // 4. Reverse TON DNS / TonAPI fallback
     if (rawAddress) {
       const dnsPromise = axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(rawAddress)}/dns/backresolve`, {
+          headers: DEFAULT_HEADERS,
           timeout: 2000,
+          httpsAgent,
         }).catch(() => null);
       const parsePromise = axios.get(`https://tonapi.io/v2/address/${encodeURIComponent(rawAddress)}/parse`, {
+          headers: DEFAULT_HEADERS,
           timeout: 2000,
+          httpsAgent,
         }).catch(() => null);
 
       try {
@@ -449,6 +510,7 @@ export class CraftStreamTracker {
             isSold,
             isForSale,
             isProfileActive: false,
+            mtprotoInfo,
           };
         }
       } catch {}
@@ -464,6 +526,7 @@ export class CraftStreamTracker {
             isSold,
             isForSale,
             isProfileActive: false,
+            mtprotoInfo,
           };
         }
       } catch {}
@@ -475,6 +538,7 @@ export class CraftStreamTracker {
       isSold,
       isForSale,
       isProfileActive: false,
+      mtprotoInfo,
     };
   }
 

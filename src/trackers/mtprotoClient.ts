@@ -2,6 +2,23 @@ import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { config } from '../config/config.js';
 
+export interface MtprotoGiftDetails {
+  username?: string;
+  userId?: number;
+  firstName?: string;
+  ownerAddress?: string;
+  isChannel?: boolean;
+  isProfileActive: boolean;
+  giftTitle?: string;
+  num?: number;
+  modelName?: string;
+  modelRarity?: string;
+  backdropName?: string;
+  backdropRarity?: string;
+  symbolName?: string;
+  symbolRarity?: string;
+}
+
 export class MtprotoService {
   private client: TelegramClient | null = null;
   private isConnected = false;
@@ -39,16 +56,9 @@ export class MtprotoService {
   }
 
   /**
-   * Calls MTProto payments.GetUniqueStarGift to resolve owner peer and user info
+   * Calls MTProto payments.GetUniqueStarGift to resolve owner peer, user info, and gift attributes
    */
-  public async getUniqueStarGift(slug: string): Promise<{
-    username?: string;
-    userId?: number;
-    firstName?: string;
-    ownerAddress?: string;
-    isChannel?: boolean;
-    isProfileActive: boolean;
-  } | null> {
+  public async getUniqueStarGift(slug: string): Promise<MtprotoGiftDetails | null> {
     if (!this.client || !this.isConnected) return null;
 
     try {
@@ -65,40 +75,54 @@ export class MtprotoService {
       let isChannel = false;
       let isProfileActive = false;
 
-      // 1. Check users array returned by Telegram (Personal Profiles)
-      if (Array.isArray(res.users) && res.users.length > 0) {
-        const u = res.users.find((user: any) => !user.deleted && !user.bot) || res.users[0];
-        if (u && !u.deleted) {
-          if (u.username) {
-            username = u.username;
-          }
-          if (u.id) {
-            userId = Number(u.id);
-          }
-          if (u.firstName) {
-            firstName = u.firstName;
-          }
-          isProfileActive = Boolean(userId && userId > 0 && !u.bot);
+      // Determine owner peer from gift.ownerId
+      let targetUserId: number | undefined;
+      let targetChatId: number | undefined;
+
+      if (gift?.ownerId) {
+        if (gift.ownerId.className === 'PeerUser' || typeof gift.ownerId.userId !== 'undefined') {
+          targetUserId = Number(gift.ownerId.userId);
+        } else if (gift.ownerId.className === 'PeerChannel' || typeof gift.ownerId.channelId !== 'undefined') {
+          targetChatId = Number(gift.ownerId.channelId);
         }
       }
 
-      // 2. Check chats array returned by Telegram (Channels)
-      if (Array.isArray(res.chats) && res.chats.length > 0) {
-        const c = res.chats[0];
+      // 1. User Profile Resolution
+      if (targetUserId) {
+        const targetUser = Array.isArray(res.users)
+          ? res.users.find((u: any) => Number(u.id) === targetUserId)
+          : undefined;
+
+        if (targetUser && !targetUser.deleted && !targetUser.bot) {
+          userId = Number(targetUser.id);
+          username = targetUser.username;
+          firstName = targetUser.firstName;
+          isProfileActive = true;
+        }
+      } else if (targetChatId) {
+        // Channel Profile
         isChannel = true;
         isProfileActive = false;
-        if (c.username) {
-          username = c.username;
+        const targetChat = Array.isArray(res.chats)
+          ? res.chats.find((c: any) => Number(c.id) === targetChatId)
+          : undefined;
+        if (targetChat) {
+          userId = -Math.abs(Number(targetChat.id));
+          username = targetChat.username;
+          firstName = targetChat.title;
         }
-        if (c.id) {
-          userId = -Math.abs(Number(c.id));
-        }
-        if (c.title) {
-          firstName = c.title;
+      } else if (Array.isArray(res.users) && res.users.length > 0 && !gift?.ownerAddress) {
+        // Fallback: single user in payload without blockchain export
+        const u = res.users.find((user: any) => !user.deleted && !user.bot);
+        if (u) {
+          username = u.username;
+          userId = Number(u.id);
+          firstName = u.firstName;
+          isProfileActive = Boolean(userId && userId > 0);
         }
       }
 
-      // 3. Check gift.ownerName or gift.slug
+      // Check gift.ownerName fallback for username
       if (!username && gift?.ownerName) {
         if (gift.ownerName.startsWith('@')) {
           username = gift.ownerName.slice(1);
@@ -109,9 +133,36 @@ export class MtprotoService {
         }
       }
 
-      // Detached / exported blockchain-only gift has no active profile
-      if (gift?.ownerAddress && (!res.users || res.users.length === 0)) {
+      // If gift was exported to TON blockchain and has no active Telegram owner peer
+      if (gift?.ownerAddress && !targetUserId) {
         isProfileActive = false;
+      }
+
+      // Parse Attributes & Rarities from MTProto
+      let modelName: string | undefined;
+      let modelRarity: string | undefined;
+      let backdropName: string | undefined;
+      let backdropRarity: string | undefined;
+      let symbolName: string | undefined;
+      let symbolRarity: string | undefined;
+
+      if (Array.isArray(gift?.attributes)) {
+        for (const attr of gift.attributes) {
+          const permille = attr.rarityPermille;
+          const rarityStr = typeof permille === 'number' ? `${(permille / 10).toFixed(1)}%` : undefined;
+          const className = attr.className || '';
+
+          if (className === 'StarGiftAttributeModel' || (!modelName && attr.name)) {
+            modelName = attr.name;
+            if (rarityStr) modelRarity = rarityStr;
+          } else if (className === 'StarGiftAttributeBackdrop') {
+            backdropName = attr.name;
+            if (rarityStr) backdropRarity = rarityStr;
+          } else if (className === 'StarGiftAttributePattern') {
+            symbolName = attr.name;
+            if (rarityStr) symbolRarity = rarityStr;
+          }
+        }
       }
 
       return {
@@ -121,6 +172,14 @@ export class MtprotoService {
         ownerAddress: gift?.ownerAddress,
         isChannel,
         isProfileActive,
+        giftTitle: gift?.title,
+        num: gift?.num ? Number(gift.num) : undefined,
+        modelName,
+        modelRarity,
+        backdropName,
+        backdropRarity,
+        symbolName,
+        symbolRarity,
       };
     } catch {
       return null;

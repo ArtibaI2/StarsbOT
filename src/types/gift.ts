@@ -34,8 +34,11 @@ export interface UniqueCraftEvent {
   giftTitle: string;
   num: number; // e.g. 1330
   modelName: string;
+  modelRarity?: string; // e.g. "0.5%"
   backdropName?: string;
+  backdropRarity?: string; // e.g. "1.2%"
   symbolName?: string;
+  symbolRarity?: string; // e.g. "3.1%"
   rarityLevel?: 'Common' | 'Uncommon' | 'Rare' | 'Epic' | 'Legendary';
   rarityPercent?: number;
   

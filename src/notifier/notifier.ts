@@ -257,26 +257,26 @@ export class Notifier {
       : (craft.marketStatus === 'ON_PROFILE' ? '👤 Находится в профиле Telegram' : '⚡️ Свежий апгрейд в сети');
 
     const lines = [
-      `🎁 <b>ПОДАРОК УЛУЧШЕН!</b>`,
+      `🎁 <b>НОВОЕ УЛУЧШЕНИЕ В ПРОФИЛЕ!</b>`,
       '',
       `🏷️ <b>Вид подарка:</b> <b>${craft.giftTitle} #${craft.num}</b>`,
-      `🎨 <b>Модель:</b> <code>${craft.modelName}</code>`,
+      `🎨 <b>Модель:</b> <code>${craft.modelName}</code>${craft.modelRarity ? ` <i>(${craft.modelRarity})</i>` : ''}`,
     ];
 
     if (craft.rarityLevel) {
       lines.push(`🏅 <b>Редкость:</b> ${rarityBadge}`);
     }
     if (craft.backdropName) {
-      lines.push(`🌌 <b>Фон (Backdrop):</b> <code>${craft.backdropName}</code>`);
+      lines.push(`🌌 <b>Фон (Backdrop):</b> <code>${craft.backdropName}</code>${craft.backdropRarity ? ` <i>(${craft.backdropRarity})</i>` : ''}`);
     }
     if (craft.symbolName) {
-      lines.push(`💠 <b>Символ (Pattern):</b> <code>${craft.symbolName}</code>`);
+      lines.push(`💠 <b>Символ (Pattern):</b> <code>${craft.symbolName}</code>${craft.symbolRarity ? ` <i>(${craft.symbolRarity})</i>` : ''}`);
     }
     if (craft.description) {
       lines.push(`📝 <i>${craft.description}</i>`);
     }
 
-    const ownerLabel = craft.isChannel ? '📢 <b>Канал (улучшивший):</b>' : '👤 <b>Ник улучшившего:</b>';
+    const ownerLabel = craft.isChannel ? '📢 <b>Канал:</b>' : '👤 <b>Владелец:</b>';
 
     lines.push('');
     lines.push(`📊 <b>Статус:</b> <code>${statusText}</code>`);
@@ -366,9 +366,12 @@ export class Notifier {
     }
 
     if (username) {
-      keyboard.url(`💬 Написать @${username}`, `https://t.me/${username}`).row();
+      const offerMsg = encodeURIComponent(
+        `Привет! Вижу твой подарок ${craft.giftTitle} #${craft.num} в профиле. Интересует продажа?`
+      );
+      keyboard.url(`💬 Написать @${username}`, `https://t.me/${username}?text=${offerMsg}`).row();
     } else if (craft.ownerTelegramUserId) {
-      keyboard.url('💬 Написать владельцу', `tg://user?id=${craft.ownerTelegramUserId}`).row();
+      keyboard.url('💬 Открыть диалог', `tg://user?id=${craft.ownerTelegramUserId}`).row();
     }
 
     // 2. Открыть подарок прямо в приложении Telegram (открывает окно с профилем владельца)
