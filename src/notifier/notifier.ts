@@ -4,6 +4,14 @@ import { GiftListingEvent, GiftUpgradeEvent, TelegramGift, UniqueCraftEvent } fr
 import { matchesCraftFilters } from './craftFilters.js';
 import { SendPacer } from './sendPacer.js';
 
+function escapeHtml(text?: string): string {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 export class Notifier {
   private bot: Bot;
   private readonly sendPacer = new SendPacer(35);
@@ -235,16 +243,16 @@ export class Notifier {
       }
 
       if (resolvedUsername) {
-        ownerDisplay = `<a href="https://t.me/${resolvedUsername}"><b>@${resolvedUsername}</b></a> 💬 <i>(нажмите, чтобы написать)</i>`;
+        ownerDisplay = `<a href="https://t.me/${resolvedUsername}"><b>@${escapeHtml(resolvedUsername)}</b></a> 💬 <i>(нажмите, чтобы написать)</i>`;
         if (craft.ownerName.endsWith('.ton') || craft.ownerName.endsWith('.t.me')) {
-          ownerDisplay += ` <code>(${craft.ownerName})</code>`;
+          ownerDisplay += ` <code>(${escapeHtml(craft.ownerName)})</code>`;
         }
       } else if (craft.ownerName.endsWith('.ton')) {
-        ownerDisplay = `<a href="https://tonviewer.com/${craft.ownerName}"><b>${craft.ownerName}</b></a> (TON DNS)`;
+        ownerDisplay = `<a href="https://tonviewer.com/${encodeURIComponent(craft.ownerName)}"><b>${escapeHtml(craft.ownerName)}</b></a> (TON DNS)`;
       } else if (craft.ownerAddress) {
-        ownerDisplay = `<a href="https://tonviewer.com/${craft.ownerAddress}"><code>${craft.ownerName}</code></a> (Wallet)`;
+        ownerDisplay = `<a href="https://tonviewer.com/${encodeURIComponent(craft.ownerAddress)}"><code>${escapeHtml(craft.ownerName)}</code></a> (Wallet)`;
       } else {
-        ownerDisplay = `<code>${craft.ownerName}</code>`;
+        ownerDisplay = `<b>${escapeHtml(craft.ownerName)}</b> (в профиле Telegram)`;
       }
     }
 
@@ -259,21 +267,21 @@ export class Notifier {
     const lines = [
       `🎁 <b>НОВОЕ УЛУЧШЕНИЕ В ПРОФИЛЕ!</b>`,
       '',
-      `🏷️ <b>Вид подарка:</b> <b>${craft.giftTitle} #${craft.num}</b>`,
-      `🎨 <b>Модель:</b> <code>${craft.modelName}</code>${craft.modelRarity ? ` <i>(${craft.modelRarity})</i>` : ''}`,
+      `🏷️ <b>Вид подарка:</b> <b>${escapeHtml(craft.giftTitle)} #${craft.num}</b>`,
+      `🎨 <b>Модель:</b> <code>${escapeHtml(craft.modelName)}</code>${craft.modelRarity ? ` <i>(${escapeHtml(craft.modelRarity)})</i>` : ''}`,
     ];
 
     if (craft.rarityLevel) {
       lines.push(`🏅 <b>Редкость:</b> ${rarityBadge}`);
     }
     if (craft.backdropName) {
-      lines.push(`🌌 <b>Фон (Backdrop):</b> <code>${craft.backdropName}</code>${craft.backdropRarity ? ` <i>(${craft.backdropRarity})</i>` : ''}`);
+      lines.push(`🌌 <b>Фон (Backdrop):</b> <code>${escapeHtml(craft.backdropName)}</code>${craft.backdropRarity ? ` <i>(${escapeHtml(craft.backdropRarity)})</i>` : ''}`);
     }
     if (craft.symbolName) {
-      lines.push(`💠 <b>Символ (Pattern):</b> <code>${craft.symbolName}</code>${craft.symbolRarity ? ` <i>(${craft.symbolRarity})</i>` : ''}`);
+      lines.push(`💠 <b>Символ (Pattern):</b> <code>${escapeHtml(craft.symbolName)}</code>${craft.symbolRarity ? ` <i>(${escapeHtml(craft.symbolRarity)})</i>` : ''}`);
     }
     if (craft.description) {
-      lines.push(`📝 <i>${craft.description}</i>`);
+      lines.push(`📝 <i>${escapeHtml(craft.description)}</i>`);
     }
 
     const ownerLabel = craft.isChannel ? '📢 <b>Канал:</b>' : '👤 <b>Владелец:</b>';
@@ -365,33 +373,35 @@ export class Notifier {
       }
     }
 
+    const tgNftUrl = craft.telegramNftUrl || `https://t.me/nft/${craft.giftId}`;
+
     if (username) {
       const offerMsg = encodeURIComponent(
         `Привет! Вижу твой подарок ${craft.giftTitle} #${craft.num} в профиле. Интересует продажа?`
       );
       keyboard.url(`💬 Написать @${username}`, `https://t.me/${username}?text=${offerMsg}`).row();
-    } else if (craft.ownerTelegramUserId) {
-      keyboard.url('💬 Открыть диалог', `tg://user?id=${craft.ownerTelegramUserId}`).row();
+      keyboard.url('📱 Профиль в Telegram', tgNftUrl);
+    } else {
+      // Для пользователей без публичного @юзернейма (например, "Иван")
+      // t.me/nft/<slug> открывает карточку подарка с профилем владельца напрямую в Telegram!
+      // ВАЖНО: Telegram Bot API запрещает использовать tg://user?id= в кнопках (вызывает ошибку BUTTON_USER_INVALID)
+      keyboard.url('📱 Профиль владельца (в Telegram)', tgNftUrl);
     }
 
-    // 2. Открыть подарок прямо в приложении Telegram (открывает окно с профилем владельца)
-    const tgNftUrl = craft.telegramNftUrl || `https://t.me/nft/${craft.giftId}`;
-    keyboard.url('📱 Профиль в Telegram (t.me/nft)', tgNftUrl);
-
-    // 3. Маркетплейс MRKT (МКТ)
+    // 2. Маркетплейс MRKT (МКТ)
     const mrktUrl = craft.mrktUrl || 'https://t.me/mrkt';
     keyboard.url('🛍️ MRKT (МКТ)', mrktUrl).row();
 
-    // 4. Fragment
+    // 3. Fragment
     const fragmentUrl = craft.fragmentUrl || craft.platformUrl;
     keyboard.url('🌐 Fragment', fragmentUrl);
 
-    // 5. Getgems
+    // 4. Getgems
     if (craft.getgemsUrl) {
       keyboard.url('💎 Getgems', craft.getgemsUrl);
     }
 
-    // 6. Tonviewer
+    // 5. Tonviewer
     if (craft.tonviewerUrl) {
       keyboard.url('🔍 Tonviewer', craft.tonviewerUrl).row();
     }
