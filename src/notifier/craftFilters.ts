@@ -5,8 +5,9 @@ export function matchesCraftFilters(
   subscription: Pick<UserSubscription, 'onlyProfileUpgrades' | 'filterChannels' | 'filterGetgems' | 'minRarity'>,
   craft: Pick<UniqueCraftEvent, 'isUpgradedOnProfile' | 'ownerTelegramUsername' | 'isChannel' | 'isOnGetgems' | 'rarityLevel'>
 ): boolean {
-  if (subscription.onlyProfileUpgrades !== false && !craft.isUpgradedOnProfile && !craft.ownerTelegramUsername) {
-    return false;
+  // Отправляем только подарки, которые уже находятся в профиле
+   if (!craft.isUpgradedOnProfile) {
+  return false;
   }
 
   if (subscription.filterChannels === 'ONLY_USERS' && craft.isChannel) return false;
