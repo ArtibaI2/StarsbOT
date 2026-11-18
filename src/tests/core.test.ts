@@ -48,3 +48,8 @@ test('newest events are ordered first', () => {
   const ordered = newestFirst([{ timestamp: 10 }, { timestamp: 30 }, { timestamp: 20 }]);
   assert.deepEqual(ordered.map((event) => event.timestamp), [30, 20, 10]);
 });
+
+test('onlyProfileUpgrades filter rejects gifts not on profile', () => {
+  assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: false, ownerTelegramUsername: undefined }), false);
+  assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: true }), true);
+});

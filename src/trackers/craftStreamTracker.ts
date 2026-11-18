@@ -203,9 +203,8 @@ export class CraftStreamTracker {
         this.fetchIsGetgemsListed(nftItemAddress),
       ]);
 
-      // If the collectible is already SOLD on Fragment and NOT on a user profile, DISCARD IT!
-      if (ownerResolution.isSold && !ownerResolution.telegramUsername && !ownerResolution.telegramUserId) {
-        console.log(`⏩ [UpgradeStream] Skipping already sold collectible: ${tokenName}`);
+      // STRICT PROFILE FILTER: Watch ONLY active gifts displayed on a human user's Telegram profile!
+      if (!ownerResolution.isProfileActive || !ownerResolution.telegramUserId || ownerResolution.isChannel) {
         return null;
       }
 
@@ -324,6 +323,7 @@ export class CraftStreamTracker {
     isSold: boolean;
     isForSale: boolean;
     isChannel?: boolean;
+    isProfileActive: boolean;
   }> {
     let isSold = false;
     let isForSale = false;
@@ -361,7 +361,7 @@ export class CraftStreamTracker {
     }
 
     // 1. MTProto resolution (Live Telegram Profile)
-    if (mtprotoInfo?.username || mtprotoInfo?.userId) {
+    if (mtprotoInfo?.isProfileActive && mtprotoInfo?.userId) {
       if (rawAddress && mtprotoInfo.username) {
         db.setWalletUsername(rawAddress, mtprotoInfo.username, 'mtproto');
       }
@@ -373,6 +373,7 @@ export class CraftStreamTracker {
         isSold,
         isForSale,
         isChannel: Boolean(mtprotoInfo.isChannel),
+        isProfileActive: true,
       };
     }
 
@@ -386,6 +387,7 @@ export class CraftStreamTracker {
           isRealName: true,
           isSold,
           isForSale,
+          isProfileActive: false,
         };
       }
     }
@@ -417,6 +419,7 @@ export class CraftStreamTracker {
         isRealName: true,
         isSold,
         isForSale,
+        isProfileActive: false,
       };
     }
 
@@ -445,6 +448,7 @@ export class CraftStreamTracker {
             isRealName: true,
             isSold,
             isForSale,
+            isProfileActive: false,
           };
         }
       } catch {}
@@ -459,6 +463,7 @@ export class CraftStreamTracker {
             isRealName: false,
             isSold,
             isForSale,
+            isProfileActive: false,
           };
         }
       } catch {}
@@ -469,6 +474,7 @@ export class CraftStreamTracker {
       isRealName: false,
       isSold,
       isForSale,
+      isProfileActive: false,
     };
   }
 

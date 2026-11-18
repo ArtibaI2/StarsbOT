@@ -47,6 +47,7 @@ export class MtprotoService {
     firstName?: string;
     ownerAddress?: string;
     isChannel?: boolean;
+    isProfileActive: boolean;
   } | null> {
     if (!this.client || !this.isConnected) return null;
 
@@ -62,18 +63,22 @@ export class MtprotoService {
       let userId: number | undefined;
       let firstName: string | undefined;
       let isChannel = false;
+      let isProfileActive = false;
 
       // 1. Check users array returned by Telegram (Personal Profiles)
       if (Array.isArray(res.users) && res.users.length > 0) {
-        const u = res.users[0];
-        if (u.username) {
-          username = u.username;
-        }
-        if (u.id) {
-          userId = Number(u.id);
-        }
-        if (u.firstName) {
-          firstName = u.firstName;
+        const u = res.users.find((user: any) => !user.deleted && !user.bot) || res.users[0];
+        if (u && !u.deleted) {
+          if (u.username) {
+            username = u.username;
+          }
+          if (u.id) {
+            userId = Number(u.id);
+          }
+          if (u.firstName) {
+            firstName = u.firstName;
+          }
+          isProfileActive = Boolean(userId && userId > 0 && !u.bot);
         }
       }
 
@@ -81,6 +86,7 @@ export class MtprotoService {
       if (Array.isArray(res.chats) && res.chats.length > 0) {
         const c = res.chats[0];
         isChannel = true;
+        isProfileActive = false;
         if (c.username) {
           username = c.username;
         }
@@ -103,12 +109,18 @@ export class MtprotoService {
         }
       }
 
+      // Detached / exported blockchain-only gift has no active profile
+      if (gift?.ownerAddress && (!res.users || res.users.length === 0)) {
+        isProfileActive = false;
+      }
+
       return {
         username,
         userId,
         firstName,
         ownerAddress: gift?.ownerAddress,
         isChannel,
+        isProfileActive,
       };
     } catch {
       return null;
