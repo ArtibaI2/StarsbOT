@@ -169,8 +169,12 @@ export class ListingTracker {
         }
       } catch (colErr: any) {
         if (colErr?.response?.status === 429) {
-          break;
+          console.warn(
+            `⚠️ [ListingTracker] TonAPI rate limit (429) for ${col.name}. Skipping this collection until next poll.`
+          );
+          continue;
         }
+        console.warn(`⚠️ [ListingTracker] Failed to poll ${col.name}:`, colErr?.message || colErr);
       }
     }
 

@@ -1,6 +1,7 @@
+import { config } from '../config/config.js';
 import { UserSubscription } from '../types/user.js';
 
-export const ADMIN_IDS = [6965669923, 8230668674, 6175753245];
+export const ADMIN_IDS = config.ADMIN_IDS;
 
 export function isAdmin(userId?: number | string): boolean {
   if (!userId) return false;

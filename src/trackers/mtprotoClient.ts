@@ -24,8 +24,16 @@ export class MtprotoService {
   private isConnected = false;
 
   public async init(): Promise<boolean> {
-    const apiId = config.TELEGRAM_API_ID ? Number(config.TELEGRAM_API_ID) : 2040;
-    const apiHash = config.TELEGRAM_API_HASH || 'b18441a1ff607e10a989891a5462e627';
+    if (!config.TELEGRAM_API_ID || !config.TELEGRAM_API_HASH) {
+      console.warn(
+        '⚠️ [MTProto] TELEGRAM_API_ID / TELEGRAM_API_HASH are not set. ' +
+          'Profile validation will fall back to Fragment HTML. Get credentials at https://my.telegram.org.'
+      );
+      return false;
+    }
+
+    const apiId = Number(config.TELEGRAM_API_ID);
+    const apiHash = config.TELEGRAM_API_HASH;
 
     try {
       const session = new StringSession(config.TELEGRAM_SESSION || '');
@@ -89,9 +97,16 @@ export class MtprotoService {
 
       // 1. User Profile Resolution: ONLY if gift.ownerId is a PeerUser and NOT exported to TON blockchain
       if (targetUserId && !gift?.ownerAddress) {
-        const targetUser = Array.isArray(res.users)
-          ? res.users.find((u: any) => Number(u.id) === targetUserId)
-          : undefined;
+        const users = Array.isArray(res.users)
+          ? (res.users as Array<{
+              id: unknown;
+              deleted?: boolean;
+              bot?: boolean;
+              username?: string;
+              firstName?: string;
+            }>)
+          : [];
+        const targetUser = users.find((u) => Number(u.id) === targetUserId);
 
         if (targetUser && !targetUser.deleted && !targetUser.bot) {
           userId = Number(targetUser.id);
@@ -103,9 +118,10 @@ export class MtprotoService {
         // Channel Profile
         isChannel = true;
         isProfileActive = false;
-        const targetChat = Array.isArray(res.chats)
-          ? res.chats.find((c: any) => Number(c.id) === targetChatId)
-          : undefined;
+        const chats = Array.isArray(res.chats)
+          ? (res.chats as Array<{ id: unknown; username?: string; title?: string }>)
+          : [];
+        const targetChat = chats.find((c) => Number(c.id) === targetChatId);
         if (targetChat) {
           userId = -Math.abs(Number(targetChat.id));
           username = targetChat.username;
@@ -171,7 +187,8 @@ export class MtprotoService {
         symbolName,
         symbolRarity,
       };
-    } catch {
+    } catch (err: any) {
+      console.warn(`⚠️ [MTProto] getUniqueStarGift failed for ${slug}:`, err?.message || err);
       return null;
     }
   }

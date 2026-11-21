@@ -218,7 +218,12 @@ export class CraftStreamTracker {
 
       // Parallel execution: Metadata + 100% Comprehensive Multi-Layer Profile Validation
       const [metaRes, ownerResolution] = await Promise.all([
-        axios.get(metaUrl, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent }).catch(() => ({ data: {} })),
+        axios
+          .get(metaUrl, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent })
+          .catch((err: any) => {
+            console.warn(`⚠️ [UpgradeStream] Failed to load metadata for ${tokenName}:`, err?.message || err);
+            return { data: {} };
+          }),
         validateProfileGift(tokenName, senderAddress, nftItemAddress, this.tonApiKey, httpsAgent),
       ]);
 

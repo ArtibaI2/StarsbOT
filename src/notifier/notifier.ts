@@ -12,12 +12,64 @@ function escapeHtml(text?: string): string {
     .replace(/>/g, '&gt;');
 }
 
+function isBlockedError(err: any): boolean {
+  return (
+    err?.error_code === 403 ||
+    (typeof err?.description === 'string' &&
+      /blocked|chat not found|user is deactivated/i.test(err.description))
+  );
+}
+
+function isRetryableError(err: any): boolean {
+  const code = err?.error_code;
+  if (code === 429) return true;
+  if (typeof code === 'number' && code >= 500) return true;
+
+  const netCode = err?.code;
+  return (
+    netCode === 'ECONNRESET' ||
+    netCode === 'ETIMEDOUT' ||
+    netCode === 'ECONNREFUSED' ||
+    netCode === 'EAI_AGAIN' ||
+    netCode === 'ENOTFOUND'
+  );
+}
+
 export class Notifier {
   private bot: Bot;
   private readonly sendPacer = new SendPacer(35);
 
   constructor(bot: Bot) {
     this.bot = bot;
+  }
+
+  /**
+   * Retries retryable Telegram failures (429 / 5xx / transient network errors)
+   * with exponential backoff and respects the API-provided retry_after.
+   */
+  private async sendWithRetry<T>(operation: () => Promise<T>, maxAttempts = 3): Promise<T> {
+    let attempt = 0;
+    let delayMs = 500;
+
+    while (true) {
+      try {
+        return await operation();
+      } catch (err: any) {
+        attempt++;
+        if (!isRetryableError(err) || attempt >= maxAttempts) {
+          throw err;
+        }
+
+        const retryAfterSec = Number(err?.parameters?.retry_after ?? 0);
+        const waitMs = retryAfterSec > 0 ? retryAfterSec * 1000 : delayMs;
+        console.warn(
+          `⏳ Telegram send retry ${attempt}/${maxAttempts} in ${waitMs}ms ` +
+            `(${err?.error_code ?? err?.code ?? 'network'})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        delayMs = Math.min(delayMs * 2, 8000);
+      }
+    }
   }
 
   /**
@@ -90,25 +142,37 @@ export class Notifier {
     try {
       if (imageUrl) {
         try {
-          await this.bot.api.sendPhoto(chatId, imageUrl, {
-            caption,
-            parse_mode: 'HTML',
-            reply_markup: keyboard,
-          });
+          await this.sendWithRetry(() =>
+            this.bot.api.sendPhoto(chatId, imageUrl, {
+              caption,
+              parse_mode: 'HTML',
+              reply_markup: keyboard,
+            })
+          );
           return true;
-        } catch {
-          // If sending photo fails, fall back to text
+        } catch (photoErr: any) {
+          if (isBlockedError(photoErr)) {
+            db.markBlocked(chatId);
+            return false;
+          }
+          // Bad/unsupported image or exhausted retries -> fall back to a text message.
+          console.warn(
+            `⚠️ Photo delivery failed for ${chatId}, falling back to text:`,
+            photoErr?.message || photoErr
+          );
         }
       }
 
-      await this.bot.api.sendMessage(chatId, caption, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard,
-        link_preview_options: { is_disabled: false },
-      });
+      await this.sendWithRetry(() =>
+        this.bot.api.sendMessage(chatId, caption, {
+          parse_mode: 'HTML',
+          reply_markup: keyboard,
+          link_preview_options: { is_disabled: false },
+        })
+      );
       return true;
     } catch (err: any) {
-      if (err?.error_code === 403 || err?.description?.includes('blocked')) {
+      if (isBlockedError(err)) {
         db.markBlocked(chatId);
       } else {
         console.warn(`⚠️ Failed to send message to ${chatId}:`, err?.message || err);
@@ -126,20 +190,42 @@ export class Notifier {
     keyboard?: InlineKeyboard
   ): Promise<boolean> {
     try {
-      await this.bot.api.sendMessage(chatId, text, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard,
-        link_preview_options: { is_disabled: false },
-      });
+      await this.sendWithRetry(() =>
+        this.bot.api.sendMessage(chatId, text, {
+          parse_mode: 'HTML',
+          reply_markup: keyboard,
+          link_preview_options: { is_disabled: false },
+        })
+      );
       return true;
     } catch (err: any) {
-      if (err?.error_code === 403 || err?.description?.includes('blocked')) {
+      if (isBlockedError(err)) {
         db.markBlocked(chatId);
       } else {
         console.warn(`⚠️ Failed to send message to ${chatId}:`, err?.message || err);
       }
       return false;
     }
+  }
+
+  /**
+   * Resolves a public Telegram username from the owner's display name.
+   * Returns undefined when the name is not a valid public username.
+   */
+  private resolveUsername(ownerName?: string, ownerTelegramUsername?: string): string | undefined {
+    if (ownerTelegramUsername) return ownerTelegramUsername;
+    if (!ownerName) return undefined;
+
+    let candidate: string | undefined;
+    if (ownerName.endsWith('.ton')) candidate = ownerName.replace(/\.ton$/i, '');
+    else if (ownerName.endsWith('.t.me')) candidate = ownerName.replace(/\.t.me$/i, '');
+    else if (ownerName.startsWith('@')) candidate = ownerName.slice(1);
+    else if (/^[a-zA-Z0-9_]{4,32}$/.test(ownerName)) candidate = ownerName;
+
+    if (candidate && /^[a-zA-Z0-9_]{4,32}$/.test(candidate) && !candidate.includes('-')) {
+      return candidate;
+    }
+    return undefined;
   }
 
   // --- Message Formatters ---
@@ -229,18 +315,7 @@ export class Notifier {
 
     let ownerDisplay = '<i>Скрыт / Анонимно</i>';
     if (craft.ownerName && craft.ownerName !== 'Анонимно / Скрыт') {
-      let resolvedUsername = craft.ownerTelegramUsername;
-      if (!resolvedUsername && craft.ownerName) {
-        let cand: string | undefined;
-        if (craft.ownerName.endsWith('.ton')) cand = craft.ownerName.replace(/\.ton$/i, '');
-        else if (craft.ownerName.endsWith('.t.me')) cand = craft.ownerName.replace(/\.t.me$/i, '');
-        else if (craft.ownerName.startsWith('@')) cand = craft.ownerName.slice(1);
-        else if (/^[a-zA-Z0-9_]{4,32}$/.test(craft.ownerName)) cand = craft.ownerName;
-
-        if (cand && /^[a-zA-Z0-9_]{4,32}$/.test(cand) && !cand.includes('-')) {
-          resolvedUsername = cand;
-        }
-      }
+      const resolvedUsername = this.resolveUsername(craft.ownerName, craft.ownerTelegramUsername);
 
       if (resolvedUsername) {
         ownerDisplay = `<a href="https://t.me/${resolvedUsername}"><b>@${escapeHtml(resolvedUsername)}</b></a> 💬 <i>(нажмите, чтобы написать)</i>`;
@@ -360,18 +435,7 @@ export class Notifier {
     const keyboard = new InlineKeyboard();
 
     // 1. Прямая кнопка написать в ЛС если есть валидный Telegram-юзернейм (без дефисов!)
-    let username = craft.ownerTelegramUsername;
-    if (!username && craft.ownerName) {
-      let cand: string | undefined;
-      if (craft.ownerName.endsWith('.ton')) cand = craft.ownerName.replace(/\.ton$/i, '');
-      else if (craft.ownerName.endsWith('.t.me')) cand = craft.ownerName.replace(/\.t.me$/i, '');
-      else if (craft.ownerName.startsWith('@')) cand = craft.ownerName.slice(1);
-      else if (/^[a-zA-Z0-9_]{4,32}$/.test(craft.ownerName)) cand = craft.ownerName;
-
-      if (cand && /^[a-zA-Z0-9_]{4,32}$/.test(cand) && !cand.includes('-')) {
-        username = cand;
-      }
-    }
+    const username = this.resolveUsername(craft.ownerName, craft.ownerTelegramUsername);
 
     const tgNftUrl = craft.telegramNftUrl || `https://t.me/nft/${craft.giftId}`;
 

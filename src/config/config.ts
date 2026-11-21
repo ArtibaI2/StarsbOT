@@ -4,15 +4,24 @@ import path from 'path';
 
 dotenv.config();
 
+function parseAdminIds(value: string | undefined): number[] {
+  return (value ?? '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .map((part) => Number(part))
+    .filter((id) => Number.isInteger(id) && id > 0);
+}
+
 const envSchema = z.object({
   BOT_TOKEN: z.string().min(10, 'BOT_TOKEN is required. Get one from @BotFather in Telegram.'),
-  
-  // MTProto settings (Optional for userbot capabilities)
+
+  // MTProto settings (required for authoritative profile validation)
   TELEGRAM_API_ID: z.coerce.number().optional(),
   TELEGRAM_API_HASH: z.string().optional(),
   TELEGRAM_SESSION: z.string().optional(),
-  
-  // TON Blockchain & Indexer API (Optional, for on-chain unique gift stream)
+
+  // TON Blockchain & Indexer API (optional, for on-chain unique gift stream)
   TONAPI_KEY: z.string().optional(),
 
   // Intervals in seconds
@@ -23,8 +32,13 @@ const envSchema = z.object({
   // MRKT Marketplace API Token
   MRKT_AUTH_TOKEN: z.string().optional(),
 
-  // Admin and Data
-  ADMIN_CHAT_ID: z.coerce.number().optional(),
+  // Comma-separated Telegram user IDs with admin access
+  ADMIN_IDS: z
+    .string()
+    .optional()
+    .transform((value) => parseAdminIds(value)),
+
+  // Data directory
   DATA_DIR: z.string().default('./data'),
 });
 
@@ -41,12 +55,29 @@ if (!parsed.success) {
   }
 }
 
-export const config = parsed.success ? parsed.data : {
+// Typed fallback used only when validation fails (e.g. missing BOT_TOKEN).
+// It never pretends that missing values are present.
+const fallback: z.infer<typeof envSchema> = {
   BOT_TOKEN: process.env.BOT_TOKEN || '',
+  TELEGRAM_API_ID: process.env.TELEGRAM_API_ID ? Number(process.env.TELEGRAM_API_ID) : undefined,
+  TELEGRAM_API_HASH: process.env.TELEGRAM_API_HASH,
+  TELEGRAM_SESSION: process.env.TELEGRAM_SESSION,
+  TONAPI_KEY: process.env.TONAPI_KEY,
   STORE_POLL_INTERVAL_SEC: 30,
   CRAFT_POLL_INTERVAL_SEC: 3,
-  DATA_DIR: './data',
-} as z.infer<typeof envSchema>;
+  MRKT_SYNC_INTERVAL_SEC: 60,
+  MRKT_AUTH_TOKEN: process.env.MRKT_AUTH_TOKEN,
+  ADMIN_IDS: parseAdminIds(process.env.ADMIN_IDS),
+  DATA_DIR: process.env.DATA_DIR || './data',
+};
+
+export const config = parsed.success ? parsed.data : fallback;
+
+if (config.ADMIN_IDS.length === 0) {
+  console.warn(
+    '⚠️ ADMIN_IDS is empty — nobody can access the admin panel. ' +
+      'Set ADMIN_IDS in .env (comma-separated Telegram user IDs).'
+  );
+}
 
 export const resolvedDataDir = path.resolve(process.cwd(), config.DATA_DIR);
-

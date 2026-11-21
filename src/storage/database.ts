@@ -47,6 +47,8 @@ export class Database {
   private filePath: string;
   private data: DatabaseSchema;
   private saveTimeout: NodeJS.Timeout | null = null;
+  private seenCraftIdSet: Set<string>;
+  private seenListingIdSet: Set<string>;
 
   constructor() {
     if (!fs.existsSync(resolvedDataDir)) {
@@ -54,24 +56,38 @@ export class Database {
     }
     this.filePath = path.join(resolvedDataDir, 'bot_data.json');
     this.data = this.load();
+    this.seenCraftIdSet = new Set(this.data.seenCraftIds);
+    this.seenListingIdSet = new Set(this.data.seenListingIds);
   }
 
   private load(): DatabaseSchema {
     try {
       if (fs.existsSync(this.filePath)) {
         const raw = fs.readFileSync(this.filePath, 'utf-8');
-        const parsed = JSON.parse(raw);
+        const parsed: unknown = JSON.parse(raw);
+
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Database file does not contain a JSON object');
+        }
+
+        const record = parsed as Partial<DatabaseSchema>;
         return {
           ...DEFAULT_DB,
-          ...parsed,
-          subscribers: parsed.subscribers || {},
-          knownGifts: parsed.knownGifts || {},
-          seenCraftIds: parsed.seenCraftIds || [],
-          seenListingIds: parsed.seenListingIds || [],
-          subscriptionSystemEnabled: Boolean(parsed.subscriptionSystemEnabled),
+          ...record,
+          subscribers: record.subscribers && typeof record.subscribers === 'object' ? record.subscribers : {},
+          knownGifts: record.knownGifts && typeof record.knownGifts === 'object' ? record.knownGifts : {},
+          seenCraftIds: Array.isArray(record.seenCraftIds)
+            ? record.seenCraftIds.filter((id): id is string => typeof id === 'string')
+            : [],
+          seenListingIds: Array.isArray(record.seenListingIds)
+            ? record.seenListingIds.filter((id): id is string => typeof id === 'string')
+            : [],
+          walletMappings:
+            record.walletMappings && typeof record.walletMappings === 'object' ? record.walletMappings : {},
+          subscriptionSystemEnabled: Boolean(record.subscriptionSystemEnabled),
           stats: {
             ...DEFAULT_DB.stats,
-            ...(parsed.stats || {}),
+            ...(record.stats && typeof record.stats === 'object' ? record.stats : {}),
           },
         };
       }
@@ -278,7 +294,7 @@ export class Database {
   // --- Seen Unique Crafts (Deduplication) ---
 
   public isCraftSeen(craftId: string): boolean {
-    return this.data.seenCraftIds.includes(craftId);
+    return this.seenCraftIdSet.has(craftId);
   }
 
   public isCraftBaselineSet(): boolean {
@@ -291,19 +307,22 @@ export class Database {
   }
 
   public markCraftSeen(craftId: string): void {
-    if (!this.data.seenCraftIds.includes(craftId)) {
-      this.data.seenCraftIds.push(craftId);
-      if (this.data.seenCraftIds.length > 15000) {
-        this.data.seenCraftIds = this.data.seenCraftIds.slice(-10000);
-      }
-      this.scheduleSave();
+    if (this.seenCraftIdSet.has(craftId)) return;
+
+    this.seenCraftIdSet.add(craftId);
+    this.data.seenCraftIds.push(craftId);
+
+    if (this.data.seenCraftIds.length > 15000) {
+      this.data.seenCraftIds = this.data.seenCraftIds.slice(-10000);
+      this.seenCraftIdSet = new Set(this.data.seenCraftIds);
     }
+    this.scheduleSave();
   }
 
   // --- Seen Listings (Deduplication) ---
 
   public isListingSeen(listingId: string): boolean {
-    return this.data.seenListingIds.includes(listingId);
+    return this.seenListingIdSet.has(listingId);
   }
 
   public isListingBaselineSet(): boolean {
@@ -316,13 +335,16 @@ export class Database {
   }
 
   public markListingSeen(listingId: string): void {
-    if (!this.data.seenListingIds.includes(listingId)) {
-      this.data.seenListingIds.push(listingId);
-      if (this.data.seenListingIds.length > 10000) {
-        this.data.seenListingIds = this.data.seenListingIds.slice(-8000);
-      }
-      this.scheduleSave();
+    if (this.seenListingIdSet.has(listingId)) return;
+
+    this.seenListingIdSet.add(listingId);
+    this.data.seenListingIds.push(listingId);
+
+    if (this.data.seenListingIds.length > 10000) {
+      this.data.seenListingIds = this.data.seenListingIds.slice(-8000);
+      this.seenListingIdSet = new Set(this.data.seenListingIds);
     }
+    this.scheduleSave();
   }
 
   // --- Wallet Mappings (OSINT / Cache) ---
@@ -348,6 +370,10 @@ export class Database {
       updatedAt: new Date().toISOString(),
     };
     this.scheduleSave();
+  }
+
+  public getWalletMappingsCount(): number {
+    return Object.keys(this.data.walletMappings ?? {}).length;
   }
 
   // --- Statistics ---

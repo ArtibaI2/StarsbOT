@@ -9,6 +9,8 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
+      - key: ADMIN_IDS
+        sync: false
       - key: PORT
         value: 8080
       - key: CRAFT_POLL_INTERVAL_SEC

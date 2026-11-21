@@ -1,3 +1,4 @@
+import https from 'https';
 import axios from 'axios';
 import { mtprotoService, MtprotoGiftDetails } from './mtprotoClient.js';
 import { isGetgemsSale } from './marketplace.js';
@@ -38,7 +39,7 @@ export async function validateProfileGift(
   rawSenderAddress?: string,
   nftItemAddress?: string,
   tonApiKey?: string,
-  httpsAgent?: any
+  httpsAgent?: https.Agent
 ): Promise<ProfileValidationResult> {
   let isSold = false;
   let isForSale = false;
@@ -57,12 +58,18 @@ export async function validateProfileGift(
 
   let fragmentOwnerRaw: string | undefined;
 
-  // 2. Fragment Analysis
+  // 2. Fragment Analysis (fallback only; MTProto/TonAPI are authoritative)
   if (fragRes?.data) {
     const html = fragRes.data;
 
     const statusMatch = html.match(/<span class="tm-section-header-status[^>]*>([^<]+)<\/span>/i);
     const statusText = statusMatch ? statusMatch[1].trim() : '';
+
+    if (!statusMatch) {
+      console.warn(
+        `⚠️ [ProfileValidator] Could not parse Fragment status for ${slug}; page structure may have changed.`
+      );
+    }
 
     if (/sold/i.test(statusText) || /tm-status-unavail/i.test(html)) {
       isSold = true;
@@ -78,6 +85,10 @@ export async function validateProfileGift(
       if (shortMatch && shortMatch[1]) {
         fragmentOwnerRaw = shortMatch[1].trim();
       }
+    } else {
+      console.warn(
+        `⚠️ [ProfileValidator] Could not parse Fragment owner for ${slug}; page structure may have changed.`
+      );
     }
   }
 

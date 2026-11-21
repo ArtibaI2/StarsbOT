@@ -1,10 +1,21 @@
 import { Bot, InlineKeyboard } from 'grammy';
-import dotenv from 'dotenv';
-dotenv.config();
+import { config } from '../config/config.js';
 
-const bot = new Bot(process.env.BOT_TOKEN || '8832217716:AAERjQW_stRmuYpmkVFOzurKP52dH0GwiUY');
+const token = config.BOT_TOKEN;
+if (!token) {
+  console.error('❌ BOT_TOKEN is not set. Add it to your .env file.');
+  process.exit(1);
+}
+
+const bot = new Bot(token);
 
 async function main() {
+  const targets = config.ADMIN_IDS;
+  if (targets.length === 0) {
+    console.error('❌ ADMIN_IDS is empty. Set it in .env to receive the sample.');
+    process.exit(1);
+  }
+
   const text = [
     '🎁 <b>ПОДАРОК УЛУЧШЕН!</b>',
     '',
@@ -27,7 +38,7 @@ async function main() {
     .url('💎 Getgems', 'https://getgems.io').row()
     .url('🔍 Tonviewer', 'https://tonviewer.com/hatemysocials.ton');
 
-  for (const chatId of [8230668674, 6175753245]) {
+  for (const chatId of targets) {
     try {
       await bot.api.sendMessage(chatId, text, {
         parse_mode: 'HTML',
@@ -41,4 +52,3 @@ async function main() {
 }
 
 main();
-

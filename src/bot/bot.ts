@@ -7,7 +7,7 @@ export function createBot(): { bot: Bot; notifier: Notifier } {
   const bot = new Bot(config.BOT_TOKEN);
   const notifier = new Notifier(bot);
 
-  // Setup handlers and menus
+  // Setup handlers
   setupHandlers(bot, notifier);
 
   // Global error handler

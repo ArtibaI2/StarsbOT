@@ -69,6 +69,8 @@ export class MrktHarvester {
           // If token expired or rate limited
           if (err.response?.status === 401) {
             console.warn('⚠️ [MRKT Harvester] MRKT token is expired or invalid.');
+          } else {
+            console.warn('⚠️ [MRKT Harvester] MRKT API request failed:', err?.message || err);
           }
         }
       }
@@ -101,9 +103,11 @@ export class MrktHarvester {
             }
           }
         }
-      } catch {}
+      } catch (err: any) {
+        console.warn('⚠️ [MRKT Harvester] Failed to scan marketplace events:', err?.message || err);
+      }
 
-      const totalKnown = Object.keys((db as any).data?.walletMappings || {}).length;
+      const totalKnown = db.getWalletMappingsCount();
       if (harvestedCount > 0) {
         console.log(`✅ [MRKT Harvester] Added ${harvestedCount} new mappings. Total in DB: ${totalKnown}`);
       }
@@ -127,7 +131,9 @@ export class MrktHarvester {
           db.setWalletUsername(rawAddr, tgUsername, 'stream_resolver');
         }
       }
-    } catch {}
+    } catch (err: any) {
+      console.warn('⚠️ [MRKT Harvester] Failed to resolve wallet address:', err?.message || err);
+    }
   }
 }
 

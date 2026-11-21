@@ -71,9 +71,19 @@ export class StoreUpgradeTracker {
    */
   private async fetchAvailableGifts(): Promise<RawApiGift[]> {
     try {
-      // Call official Telegram Bot API method getAvailableGifts (Bot API 8.0+)
-      const response = await (this.bot.api.raw as any).getAvailableGifts();
-      return (response?.gifts || []) as RawApiGift[];
+      // Call official Telegram Bot API method getAvailableGifts (Bot API 8.0+).
+      // The grammY typings may lag behind the Bot API, so we check the method at runtime.
+      const rawApi = this.bot.api.raw as unknown as {
+        getAvailableGifts?: () => Promise<{ gifts?: RawApiGift[] }>;
+      };
+
+      if (typeof rawApi.getAvailableGifts !== 'function') {
+        console.warn('⚠️ [StoreTracker] getAvailableGifts is not available in this Bot API version.');
+        return [];
+      }
+
+      const response = await rawApi.getAvailableGifts();
+      return response?.gifts || [];
     } catch (err: any) {
       // If method is not supported or returns error, log friendly message
       if (err?.error_code === 400 || err?.description?.includes('METHOD_NOT_FOUND')) {

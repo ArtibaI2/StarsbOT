@@ -1,8 +1,17 @@
-import { Context, InlineKeyboard } from 'grammy';
-import { db, isAdmin, ADMIN_IDS } from '../storage/database.js';
+import { Bot, Context, InlineKeyboard } from 'grammy';
+import { db, isAdmin } from '../storage/database.js';
 import { Notifier } from '../notifier/notifier.js';
 
-export function setupHandlers(bot: any, notifier: Notifier): void {
+function matchText(ctx: Context): string {
+  return typeof ctx.match === 'string' ? ctx.match.trim() : '';
+}
+
+const BROADCAST_CONFIRM_TTL_MS = 60_000;
+
+export function setupHandlers(bot: Bot, notifier: Notifier): void {
+  // Pending broadcasts awaiting explicit confirmation, keyed by admin user id.
+  const pendingBroadcasts = new Map<number, { text: string; createdAt: number }>();
+
   // /start command
   bot.command('start', async (ctx: Context) => {
     if (!ctx.chat || !ctx.from) return;
@@ -35,10 +44,7 @@ export function setupHandlers(bot: any, notifier: Notifier): void {
         '',
         `У вас пока нет активной подписки на мониторинг улучшений подарков.`,
         '',
-        `Для получения доступа обратитесь к одному из администраторов:`,
-        `  • <code>ID 6965669923</code>`,
-        `  • <code>ID 8230668674</code>`,
-        `  • <code>ID 6175753245</code>`,
+        `Для получения доступа обратитесь к администраторам бота.`,
         '',
         `ℹ️ <i>Ваш Telegram ID:</i> <code>${ctx.from.id}</code> (сообщите его админу для активации)`,
       ].join('\n');
@@ -332,7 +338,7 @@ export function setupHandlers(bot: any, notifier: Notifier): void {
       `  • Отправлено алертов: <b>${stats.totalCraftEventsSent}</b>`,
       `  • Аптайм бота: <b>${hours} ч. ${mins} мин.</b>`,
       '',
-      `⚡️ <i>Список админов: 6965669923, 8230668674, 6175753245</i>`,
+      `⚡️ <i>Администраторы задаются через ADMIN_IDS в .env</i>`,
     ].join('\n');
 
     const keyboard = new InlineKeyboard()
@@ -412,6 +418,8 @@ export function setupHandlers(bot: any, notifier: Notifier): void {
       '<code>/broadcast &lt;текст сообщения&gt;</code>',
       '',
       'Сообщение получат все пользователи, зарегистрированные в боте.',
+      '',
+      'После команды бот попросит подтверждение — случайную рассылку отправить нельзя.',
     ].join('\n');
     await ctx.reply(text, { parse_mode: 'HTML' });
   });
@@ -423,7 +431,7 @@ export function setupHandlers(bot: any, notifier: Notifier): void {
       return;
     }
 
-    const parts = (ctx.match as string || '').trim().split(/\s+/);
+    const parts = matchText(ctx).split(/\s+/).filter(Boolean);
     if (!parts[0]) {
       await ctx.reply('⚠️ Формат: <code>/sub_add &lt;user_id&gt; [дней|forever]</code>', { parse_mode: 'HTML' });
       return;
@@ -460,7 +468,7 @@ export function setupHandlers(bot: any, notifier: Notifier): void {
       return;
     }
 
-    const targetStr = (ctx.match as string || '').trim();
+    const targetStr = matchText(ctx);
     const targetId = parseInt(targetStr, 10);
     if (isNaN(targetId)) {
       await ctx.reply('⚠️ Формат: <code>/sub_remove &lt;user_id&gt;</code>', { parse_mode: 'HTML' });
@@ -516,32 +524,78 @@ export function setupHandlers(bot: any, notifier: Notifier): void {
     await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
   }
 
-  // /broadcast command
+  // /broadcast command (two-step: request -> explicit confirmation)
   bot.command('broadcast', async (ctx: Context) => {
     if (!ctx.from || !isAdmin(ctx.from.id)) {
       await ctx.reply('⛔ Доступ запрещён.');
       return;
     }
 
-    const message = (ctx.match as string || '').trim();
+    const message = matchText(ctx);
     if (!message) {
       await ctx.reply('⚠️ Укажите текст рассылки: <code>/broadcast &lt;текст&gt;</code>', { parse_mode: 'HTML' });
       return;
     }
 
+    // Telegram hard limit for a single message is 4096 characters.
+    if (message.length > 4000) {
+      await ctx.reply(`⚠️ Сообщение слишком длинное: ${message.length} символов (максимум 4000).`);
+      return;
+    }
+
+    const recipients = db.getAllSubscribers().filter((s) => !s.isBlocked).length;
+    pendingBroadcasts.set(ctx.from.id, { text: message, createdAt: Date.now() });
+
+    const keyboard = new InlineKeyboard()
+      .text('✅ Отправить всем', 'broadcast_confirm')
+      .text('❌ Отмена', 'broadcast_cancel');
+
+    await ctx.reply(
+      `📢 Подтвердите рассылку для ${recipients} пользователей (действует 60 секунд):\n\n${message}`,
+      { reply_markup: keyboard }
+    );
+  });
+
+  bot.callbackQuery('broadcast_confirm', async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    if (!ctx.from || !isAdmin(ctx.from.id)) return;
+
+    const pending = pendingBroadcasts.get(ctx.from.id);
+    if (!pending || Date.now() - pending.createdAt > BROADCAST_CONFIRM_TTL_MS) {
+      pendingBroadcasts.delete(ctx.from.id);
+      await ctx.reply('⌛ Подтверждение истекло. Запустите /broadcast заново.');
+      return;
+    }
+    pendingBroadcasts.delete(ctx.from.id);
+
     const subs = db.getAllSubscribers().filter((s) => !s.isBlocked);
     await ctx.reply(`📢 Начинаю рассылку для ${subs.length} пользователей...`);
 
     let sent = 0;
+    let failed = 0;
     for (const s of subs) {
       try {
-        await bot.api.sendMessage(s.chatId, message, { parse_mode: 'HTML' });
+        await bot.api.sendMessage(s.chatId, pending.text, { parse_mode: 'HTML' });
         sent++;
-      } catch {}
+      } catch (err: any) {
+        failed++;
+        if (err?.error_code === 429) {
+          const retryAfterSec = Number(err?.parameters?.retry_after ?? 1);
+          await new Promise((r) => setTimeout(r, retryAfterSec * 1000));
+        } else if (err?.error_code === 403) {
+          db.markBlocked(s.chatId);
+        }
+      }
       await new Promise((r) => setTimeout(r, 40));
     }
 
-    await ctx.reply(`✅ Рассылка завершена! Успешно доставлено: ${sent} из ${subs.length}.`);
+    await ctx.reply(`✅ Рассылка завершена! Доставлено: ${sent}, ошибок: ${failed}.`);
+  });
+
+  bot.callbackQuery('broadcast_cancel', async (ctx: Context) => {
+    await ctx.answerCallbackQuery({ text: 'Рассылка отменена' });
+    if (ctx.from) pendingBroadcasts.delete(ctx.from.id);
+    await ctx.reply('❌ Рассылка отменена.');
   });
 
   // /test command

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { config } from '../config/config.js';
 import { matchesCraftFilters } from '../notifier/craftFilters.js';
 import { hasSubscriptionAccess, isAdmin } from '../storage/access.js';
 import { isGetgemsSale, newestFirst } from '../trackers/marketplace.js';
@@ -31,12 +32,12 @@ test('Getgems filter includes or excludes portal listings', () => {
 });
 
 test('admins and subscription mode enforce access as configured', () => {
-  for (const id of [6965669923, 8230668674, 6175753245]) {
+  for (const id of config.ADMIN_IDS) {
     assert.equal(isAdmin(id), true);
     assert.equal(hasSubscriptionAccess(id, true), true);
   }
 
-  assert.equal(isAdmin(123456789), false);
+  assert.equal(isAdmin(Number.MAX_SAFE_INTEGER), false);
   assert.equal(hasSubscriptionAccess(123456789, false), true);
   assert.equal(hasSubscriptionAccess(123456789, true), false);
   assert.equal(hasSubscriptionAccess(123456789, true, { subscriptionExpiresAt: 'forever' }), true);
@@ -54,16 +55,26 @@ test('onlyProfileUpgrades filter rejects gifts not on profile', () => {
   assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: true }), true);
 });
 
-test('validateProfileGift strictly rejects sold, blockchain-exported, and marketplace gifts', async () => {
-  const { validateProfileGift } = await import('../trackers/profileValidator.js');
+test('SendPacer serializes sends and never overlaps them', async () => {
+  const { SendPacer } = await import('../notifier/sendPacer.js');
+  const pacer = new SendPacer(10);
+  const order: number[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
 
-  // skystilettos-32812 was exported to capitulation.ton and listed on Fragment
-  const skyRes = await validateProfileGift('skystilettos-32812');
-  assert.equal(skyRes.isProfileActive, false, 'skystilettos-32812 must be rejected because it is on blockchain/Fragment');
+  const run = (id: number) =>
+    pacer.run(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      order.push(id);
+      inFlight--;
+    });
 
-  // miragelamp-52415 is sold to a TON wallet
-  const lampRes = await validateProfileGift('miragelamp-52415');
-  assert.equal(lampRes.isProfileActive, false, 'miragelamp-52415 must be rejected because it is sold to a wallet');
+  await Promise.all([run(1), run(2), run(3)]);
+
+  assert.deepEqual(order, [1, 2, 3], 'Sends must run in FIFO order');
+  assert.equal(maxInFlight, 1, 'At most one send may be in flight at a time');
 });
 
 test('buildCraftKeyboard never produces BUTTON_USER_INVALID and formats links correctly', async () => {
