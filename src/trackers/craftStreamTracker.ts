@@ -4,6 +4,7 @@ import { db } from '../storage/database.js';
 import { UniqueCraftEvent } from '../types/gift.js';
 import { mtprotoService, MtprotoGiftDetails } from './mtprotoClient.js';
 import { isGetgemsSale, newestFirst } from './marketplace.js';
+import { validateProfileGift } from './profileValidator.js';
 
 export type CraftEventCallback = (craft: UniqueCraftEvent) => Promise<void>;
 
@@ -216,11 +217,10 @@ export class CraftStreamTracker {
     try {
       const metaUrl = `https://nft.fragment.com/gift/${tokenName}.json`;
 
-      // Parallel execution: Metadata + Owner & Fragment Status
-      const [metaRes, ownerResolution, isGetgemsListed] = await Promise.all([
+      // Parallel execution: Metadata + 100% Comprehensive Multi-Layer Profile Validation
+      const [metaRes, ownerResolution] = await Promise.all([
         axios.get(metaUrl, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent }).catch(() => ({ data: {} })),
-        this.resolveOwnerAndFragmentStatus(tokenName, senderAddress),
-        this.fetchIsGetgemsListed(nftItemAddress),
+        validateProfileGift(tokenName, senderAddress, nftItemAddress, this.tonApiKey, httpsAgent),
       ]);
 
       // STRICT PROFILE FILTER: Watch ONLY active gifts displayed on a human user's Telegram profile!
@@ -292,7 +292,7 @@ export class CraftStreamTracker {
         (ownerResolution.telegramUserId && ownerResolution.telegramUserId < 0)
       );
 
-      const isOnGetgems = isGetgemsListed || Boolean(
+      const isOnGetgems = Boolean(
         ownerResolution.displayName?.toLowerCase().includes('getgems') ||
         senderAddress?.toLowerCase().includes('getgems') ||
         (effectiveTonviewer && effectiveTonviewer.toLowerCase().includes('getgems'))

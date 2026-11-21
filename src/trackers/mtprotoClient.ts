@@ -75,7 +75,7 @@ export class MtprotoService {
       let isChannel = false;
       let isProfileActive = false;
 
-      // Determine owner peer from gift.ownerId
+      // Determine owner peer strictly from gift.ownerId
       let targetUserId: number | undefined;
       let targetChatId: number | undefined;
 
@@ -87,8 +87,8 @@ export class MtprotoService {
         }
       }
 
-      // 1. User Profile Resolution
-      if (targetUserId) {
+      // 1. User Profile Resolution: ONLY if gift.ownerId is a PeerUser and NOT exported to TON blockchain
+      if (targetUserId && !gift?.ownerAddress) {
         const targetUser = Array.isArray(res.users)
           ? res.users.find((u: any) => Number(u.id) === targetUserId)
           : undefined;
@@ -111,19 +111,14 @@ export class MtprotoService {
           username = targetChat.username;
           firstName = targetChat.title;
         }
-      } else if (Array.isArray(res.users) && res.users.length > 0 && !gift?.ownerAddress) {
-        // Fallback: single user in payload without blockchain export
-        const u = res.users.find((user: any) => !user.deleted && !user.bot);
-        if (u) {
-          username = u.username;
-          userId = Number(u.id);
-          firstName = u.firstName;
-          isProfileActive = Boolean(userId && userId > 0);
-        }
+      } else {
+        // If ownerId is missing or gift has ownerAddress -> definitely NOT an active profile gift!
+        // (Do NOT fall back to res.users which only contains historical recipients from StarGiftAttributeOriginalDetails)
+        isProfileActive = false;
       }
 
-      // Check gift.ownerName fallback for username
-      if (!username && gift?.ownerName) {
+      // Check gift.ownerName fallback for username only if active in profile
+      if (isProfileActive && !username && gift?.ownerName) {
         if (gift.ownerName.startsWith('@')) {
           username = gift.ownerName.slice(1);
         } else if (gift.ownerName.endsWith('.t.me')) {
@@ -131,11 +126,6 @@ export class MtprotoService {
         } else if (gift.ownerName.endsWith('.ton')) {
           username = gift.ownerName.replace(/\.ton$/i, '');
         }
-      }
-
-      // If gift was exported to TON blockchain and has no active Telegram owner peer
-      if (gift?.ownerAddress && !targetUserId) {
-        isProfileActive = false;
       }
 
       // Parse Attributes & Rarities from MTProto

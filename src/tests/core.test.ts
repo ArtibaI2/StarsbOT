@@ -53,3 +53,15 @@ test('onlyProfileUpgrades filter rejects gifts not on profile', () => {
   assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: false, ownerTelegramUsername: undefined }), false);
   assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: true }), true);
 });
+
+test('validateProfileGift strictly rejects sold, blockchain-exported, and marketplace gifts', async () => {
+  const { validateProfileGift } = await import('../trackers/profileValidator.js');
+
+  // skystilettos-32812 was exported to capitulation.ton and listed on Fragment
+  const skyRes = await validateProfileGift('skystilettos-32812');
+  assert.equal(skyRes.isProfileActive, false, 'skystilettos-32812 must be rejected because it is on blockchain/Fragment');
+
+  // miragelamp-52415 is sold to a TON wallet
+  const lampRes = await validateProfileGift('miragelamp-52415');
+  assert.equal(lampRes.isProfileActive, false, 'miragelamp-52415 must be rejected because it is sold to a wallet');
+});
