@@ -65,3 +65,68 @@ test('validateProfileGift strictly rejects sold, blockchain-exported, and market
   const lampRes = await validateProfileGift('miragelamp-52415');
   assert.equal(lampRes.isProfileActive, false, 'miragelamp-52415 must be rejected because it is sold to a wallet');
 });
+
+test('buildCraftKeyboard never produces BUTTON_USER_INVALID and formats links correctly', async () => {
+  const { Notifier } = await import('../notifier/notifier.js');
+  const notifier = new Notifier({} as any);
+
+  // Case 1: Owner has a public username
+  const craftWithUser: any = {
+    giftId: 'skystilettos-100',
+    giftTitle: 'Sky Stilettos',
+    num: 100,
+    ownerTelegramUsername: 'alice_buyer',
+    ownerName: 'Alice',
+    telegramNftUrl: 'https://t.me/nft/skystilettos-100',
+  };
+  const kb1 = notifier.buildCraftKeyboard(craftWithUser);
+  const rows1 = kb1.inline_keyboard;
+  assert.ok(rows1.length >= 2, 'Should have multiple rows for user with username');
+  assert.match((rows1[0][0] as any).url, /^https:\/\/t\.me\/alice_buyer\?text=/, 'Direct message link should lead to user dm');
+  assert.equal((rows1[1][0] as any).url, 'https://t.me/nft/skystilettos-100');
+
+  // Case 2: Owner has NO username (first name only, like "Иван")
+  const craftNoUser: any = {
+    giftId: 'skystilettos-32812',
+    giftTitle: 'Sky Stilettos',
+    num: 32812,
+    ownerTelegramUsername: undefined,
+    ownerName: 'Иван',
+    telegramNftUrl: 'https://t.me/nft/skystilettos-32812',
+  };
+  const kb2 = notifier.buildCraftKeyboard(craftNoUser);
+  const rows2 = kb2.inline_keyboard;
+  assert.ok(rows2.length >= 2, 'Should have rows including profile and marketplaces');
+  assert.equal((rows2[0][0] as any).url, 'https://t.me/nft/skystilettos-32812');
+
+  // In ALL cases: NO button must ever use tg://user?id= (which Telegram rejects with 400 Bad Request: BUTTON_USER_INVALID)
+  for (const row of [...rows1, ...rows2]) {
+    for (const btn of row) {
+      const url = (btn as any).url;
+      assert.ok(!url?.startsWith('tg://user'), `Forbidden tg://user found in button: ${url}`);
+    }
+  }
+});
+
+test('formatCraftMessage escapes special characters and preserves HTML tags safely', async () => {
+  const { Notifier } = await import('../notifier/notifier.js');
+  const notifier = new Notifier({} as any);
+
+  const craftWithHtml: any = {
+    id: 'upgrade_test',
+    giftId: 'test-1',
+    giftTitle: '<Dangerous Gift & Co>',
+    num: 1,
+    modelName: '<b>HackerModel</b>',
+    description: 'Special <tag> & symbols',
+    ownerName: '<script>alert(1)</script>',
+    marketStatus: 'ON_PROFILE',
+    timestamp: new Date().toISOString(),
+  };
+
+  const message = notifier.formatCraftMessage(craftWithHtml);
+  assert.ok(!message.includes('<script>'), 'Unescaped script tag found');
+  assert.ok(message.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'Script tag must be safely escaped');
+  assert.ok(message.includes('&lt;Dangerous Gift &amp; Co&gt;'), 'Title must be safely escaped');
+  assert.ok(message.includes('👤 Находится в профиле Telegram'), 'Status must indicate profile');
+});
