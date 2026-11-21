@@ -32,32 +32,42 @@ export class MtprotoService {
       return false;
     }
 
+    if (!config.TELEGRAM_SESSION) {
+      console.warn(
+        '⚠️ [MTProto] TELEGRAM_SESSION is not set. payments.getUniqueStarGift is a user-only method, ' +
+          'so a bot token cannot call it. Run `npm run mtproto:session` locally and set TELEGRAM_SESSION. ' +
+          'Falling back to Fragment HTML.'
+      );
+      return false;
+    }
+
     const apiId = Number(config.TELEGRAM_API_ID);
     const apiHash = config.TELEGRAM_API_HASH;
 
     try {
-      const session = new StringSession(config.TELEGRAM_SESSION || '');
+      const session = new StringSession(config.TELEGRAM_SESSION);
       this.client = new TelegramClient(session, apiId, apiHash, {
         connectionRetries: 5,
       });
 
-      console.log('⏳ [MTProto] Connecting to Telegram MTProto API...');
-      
-      if (config.TELEGRAM_SESSION) {
-        await this.client.connect();
-      } else if (config.BOT_TOKEN) {
-        await this.client.start({
-          botAuthToken: config.BOT_TOKEN,
-        });
-      } else {
-        await this.client.connect();
+      console.log('⏳ [MTProto] Connecting with a user session...');
+      await this.client.connect();
+
+      if (!(await this.client.isUserAuthorized())) {
+        console.warn(
+          '⚠️ [MTProto] TELEGRAM_SESSION is not authorized. Regenerate it with `npm run mtproto:session`.'
+        );
+        await this.client.disconnect();
+        this.client = null;
+        this.isConnected = false;
+        return false;
       }
 
       this.isConnected = true;
-      console.log('✅ [MTProto] MTProto client connected and authenticated successfully!');
+      console.log('✅ [MTProto] User session connected and authorized.');
       return true;
     } catch (err: any) {
-      console.warn('⚠️ [MTProto] Could not authenticate MTProto:', err?.message || err);
+      console.warn('⚠️ [MTProto] Could not connect with the user session:', err?.message || err);
       this.isConnected = false;
       return false;
     }

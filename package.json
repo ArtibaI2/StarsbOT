@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/tests/core.test.ts",
-    "benchmark:notifications": "tsx src/scripts/benchmarkNotifications.ts"
+    "benchmark:notifications": "tsx src/scripts/benchmarkNotifications.ts",
+    "mtproto:session": "tsx src/scripts/createMtprotoSession.ts"
   },
   "keywords": [
     "telegram",
