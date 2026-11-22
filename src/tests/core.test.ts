@@ -142,6 +142,66 @@ test('formatCraftMessage escapes special characters and preserves HTML tags safe
   assert.ok(message.includes('👤 Находится в профиле Telegram'), 'Status must indicate profile');
 });
 
+test('listing messages escape untrusted marketplace metadata', async () => {
+  const { Notifier } = await import('../notifier/notifier.js');
+  const notifier = new Notifier({} as any);
+
+  const listing: any = {
+    id: 'listing_test',
+    giftId: 'valentine_box',
+    giftTitle: '<b>Evil</b> & Co',
+    num: 7,
+    modelName: '<script>x</script>',
+    backdropName: 'A & B',
+    symbolName: '<i>s</i>',
+    description: '<img src=x onerror=alert(1)>',
+    priceTon: 12.5,
+    platformName: 'MRKT <b>',
+    platformUrl: 'https://t.me/mrkt',
+    sellerName: '@bad name',
+    sellerAddress: 'EQDc08YxzZWtlKAohSybNc3kXAkAPPtHch-jY_E6KMQ3b1mn',
+    timestamp: new Date().toISOString(),
+  };
+
+  const text = notifier.formatListingMessage(listing);
+  assert.ok(!text.includes('<script>'), 'Raw script tag leaked into the listing message');
+  assert.ok(text.includes('&lt;script&gt;x&lt;/script&gt;'), 'Model must be escaped');
+  assert.ok(text.includes('&lt;b&gt;Evil&lt;/b&gt; &amp; Co'), 'Title must be escaped');
+  assert.ok(text.includes('A &amp; B'), 'Backdrop must be escaped');
+  assert.ok(!text.includes('onerror=alert(1)>'), 'Description markup must be escaped');
+});
+
+test('listing keyboard never links to an invalid t.me/nft collection id', async () => {
+  const { Notifier } = await import('../notifier/notifier.js');
+  const notifier = new Notifier({} as any);
+
+  const base: any = {
+    id: 'listing_test',
+    giftId: 'valentine_box',
+    giftTitle: 'Valentine Box',
+    num: 7,
+    modelName: 'Classic',
+    priceTon: 12.5,
+    platformName: 'MRKT',
+    platformUrl: 'https://t.me/mrkt',
+    timestamp: new Date().toISOString(),
+  };
+
+  const withoutSlug = notifier.buildListingKeyboard(base);
+  const withoutSlugUrls = withoutSlug.inline_keyboard.flat().map((b) => (b as any).url);
+  assert.ok(
+    !withoutSlugUrls.some((u) => typeof u === 'string' && u.includes('t.me/nft/valentine_box')),
+    'A collection id must not be used as an NFT slug'
+  );
+
+  const withSlug = notifier.buildListingKeyboard({
+    ...base,
+    telegramNftUrl: 'https://t.me/nft/plushpepe-1330',
+  });
+  const withSlugUrls = withSlug.inline_keyboard.flat().map((b) => (b as any).url);
+  assert.ok(withSlugUrls.includes('https://t.me/nft/plushpepe-1330'));
+});
+
 test('parseRetryAfter handles seconds, HTTP dates and invalid values', async () => {
   const { parseRetryAfter } = await import('../trackers/mrktHarvester.js');
 

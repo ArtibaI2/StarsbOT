@@ -21,6 +21,7 @@ export class StoreUpgradeTracker {
   private timer: NodeJS.Timeout | null = null;
   private isChecking = false;
   private onEventCallbacks: UpgradeEventCallback[] = [];
+  private lastApiErrorLogAt = 0;
 
   constructor(bot: Bot, intervalSec = 30) {
     this.bot = bot;
@@ -67,32 +68,46 @@ export class StoreUpgradeTracker {
   }
 
   /**
-   * Fetches the current list of available gifts from Telegram Bot API
+   * Fetches the current list of available gifts from Telegram Bot API.
+   * Transient 5xx responses are retried once; repeated failures are logged at
+   * most every five minutes so a flaky upstream does not flood the console.
    */
   private async fetchAvailableGifts(): Promise<RawApiGift[]> {
-    try {
-      // Call official Telegram Bot API method getAvailableGifts (Bot API 8.0+).
-      // The grammY typings may lag behind the Bot API, so we check the method at runtime.
-      const rawApi = this.bot.api.raw as unknown as {
-        getAvailableGifts?: () => Promise<{ gifts?: RawApiGift[] }>;
-      };
+    // Call official Telegram Bot API method getAvailableGifts (Bot API 8.0+).
+    // The grammY typings may lag behind the Bot API, so we check the method at runtime.
+    const rawApi = this.bot.api.raw as unknown as {
+      getAvailableGifts?: () => Promise<{ gifts?: RawApiGift[] }>;
+    };
 
-      if (typeof rawApi.getAvailableGifts !== 'function') {
-        console.warn('⚠️ [StoreTracker] getAvailableGifts is not available in this Bot API version.');
-        return [];
-      }
-
-      const response = await rawApi.getAvailableGifts();
-      return response?.gifts || [];
-    } catch (err: any) {
-      // If method is not supported or returns error, log friendly message
-      if (err?.error_code === 400 || err?.description?.includes('METHOD_NOT_FOUND')) {
-        console.warn('⚠️ [StoreTracker] getAvailableGifts method returned:', err?.description);
-      } else {
-        console.error('⚠️ [StoreTracker] API call failed:', err?.message || err);
-      }
+    if (typeof rawApi.getAvailableGifts !== 'function') {
+      console.warn('⚠️ [StoreTracker] getAvailableGifts is not available in this Bot API version.');
       return [];
     }
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await rawApi.getAvailableGifts();
+        return response?.gifts || [];
+      } catch (err: any) {
+        const code = err?.error_code;
+
+        if (typeof code === 'number' && code >= 500 && attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          continue;
+        }
+
+        if (code === 400 || err?.description?.includes('METHOD_NOT_FOUND')) {
+          console.warn('⚠️ [StoreTracker] getAvailableGifts method returned:', err?.description);
+        } else if (Date.now() - this.lastApiErrorLogAt > 5 * 60 * 1000) {
+          this.lastApiErrorLogAt = Date.now();
+          console.warn('⚠️ [StoreTracker] API call failed, will retry next cycle:', err?.message || err);
+        }
+
+        return [];
+      }
+    }
+
+    return [];
   }
 
   /**

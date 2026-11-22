@@ -388,32 +388,35 @@ export class Notifier {
     let sellerDisplay = '<i>Скрыт / Wallet</i>';
     if (listing.sellerName) {
       if (listing.sellerName.startsWith('@')) {
-        sellerDisplay = `<a href="https://t.me/${listing.sellerName.slice(1)}">${listing.sellerName}</a>`;
+        const uname = listing.sellerName.slice(1);
+        sellerDisplay = /^[a-zA-Z0-9_]{4,32}$/.test(uname)
+          ? `<a href="https://t.me/${uname}">@${escapeHtml(uname)}</a>`
+          : `<code>${escapeHtml(listing.sellerName)}</code>`;
       } else if (listing.sellerAddress) {
-        sellerDisplay = `<a href="https://tonviewer.com/${listing.sellerAddress}"><code>${listing.sellerName}</code></a>`;
+        sellerDisplay = `<a href="https://tonviewer.com/${encodeURIComponent(listing.sellerAddress)}"><code>${escapeHtml(listing.sellerName)}</code></a>`;
       } else {
-        sellerDisplay = `<code>${listing.sellerName}</code>`;
+        sellerDisplay = `<code>${escapeHtml(listing.sellerName)}</code>`;
       }
     }
 
-    const platformLink = `<a href="${listing.platformUrl}"><b>${listing.platformName}</b></a>`;
+    const platformLink = `<a href="${listing.platformUrl}"><b>${escapeHtml(listing.platformName)}</b></a>`;
 
     const lines = [
       `💰 <b>ПОДАРОК ВЫСТАВЛЕН НА ПРОДАЖУ!</b>`,
       '',
-      `🏷️ <b>Вид подарка:</b> <b>${listing.giftTitle} #${listing.num}</b>`,
+      `🏷️ <b>Вид подарка:</b> <b>${escapeHtml(listing.giftTitle)} #${listing.num}</b>`,
       `💵 <b>Цена продажи:</b> <b><code>${listing.priceTon.toLocaleString()} TON</code></b>`,
-      `🎨 <b>Модель:</b> <code>${listing.modelName}</code>`,
+      `🎨 <b>Модель:</b> <code>${escapeHtml(listing.modelName)}</code>`,
     ];
 
     if (listing.backdropName) {
-      lines.push(`🌌 <b>Фон (Backdrop):</b> <code>${listing.backdropName}</code>`);
+      lines.push(`🌌 <b>Фон (Backdrop):</b> <code>${escapeHtml(listing.backdropName)}</code>`);
     }
     if (listing.symbolName) {
-      lines.push(`💠 <b>Символ (Pattern):</b> <code>${listing.symbolName}</code>`);
+      lines.push(`💠 <b>Символ (Pattern):</b> <code>${escapeHtml(listing.symbolName)}</code>`);
     }
     if (listing.description) {
-      lines.push(`📝 <i>${listing.description}</i>`);
+      lines.push(`📝 <i>${escapeHtml(listing.description)}</i>`);
     }
 
     lines.push('');
@@ -477,12 +480,15 @@ export class Notifier {
     const keyboard = new InlineKeyboard();
 
     const username = listing.sellerTelegramUsername || (listing.sellerName?.startsWith('@') ? listing.sellerName.slice(1) : undefined);
-    if (username) {
+    if (username && /^[a-zA-Z0-9_]{4,32}$/.test(username)) {
       keyboard.url(`💬 Написать продавцу (@${username})`, `https://t.me/${username}`).row();
     }
 
-    const tgNftUrl = listing.telegramNftUrl || `https://t.me/nft/${listing.giftId}`;
-    keyboard.url('📱 Открыть в Telegram', tgNftUrl);
+    // Only a real slug produces a working t.me/nft link; a collection id
+    // ("valentine_box") would open an invalid page.
+    if (listing.telegramNftUrl) {
+      keyboard.url('📱 Открыть в Telegram', listing.telegramNftUrl);
+    }
     keyboard.url(`🛍️ Купить на ${listing.platformName}`, listing.platformUrl).row();
     if (listing.sellerAddress) {
       keyboard.url('💎 В Tonviewer', `https://tonviewer.com/${listing.sellerAddress}`);

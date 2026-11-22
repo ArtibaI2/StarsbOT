@@ -5,6 +5,7 @@ import { UniqueCraftEvent } from '../types/gift.js';
 import { newestFirst } from './marketplace.js';
 import { validateProfileGift } from './profileValidator.js';
 import { giftSlugCandidates } from './giftSlug.js';
+import { tonApi, TonApiRateLimitError } from './tonApiClient.js';
 
 export type CraftEventCallback = (craft: UniqueCraftEvent) => Promise<void>;
 
@@ -26,15 +27,18 @@ const FRAGMENT_GIFT_MINTER_ADDRESS = '0:158136239adb15dd59df90c641f9efd312cfeb86
 
 export class CraftStreamTracker {
   private intervalSec: number;
-  private tonApiKey?: string;
   private timer: NodeJS.Timeout | null = null;
   private isChecking = false;
   private onCraftCallbacks: CraftEventCallback[] = [];
   private botStartedAtSec = Math.floor(Date.now() / 1000);
 
-  constructor(intervalSec = 3, tonApiKey?: string) {
+  /** Fragment metadata is immutable per slug; cache it to avoid refetching. */
+  private metaCache = new Map<string, { at: number; data: any | null }>();
+  private static readonly META_TTL_MS = 10 * 60 * 1000;
+  private static readonly META_CACHE_LIMIT = 300;
+
+  constructor(intervalSec = 3) {
     this.intervalSec = Math.max(2, intervalSec);
-    this.tonApiKey = tonApiKey;
   }
 
   public onCraft(callback: CraftEventCallback): void {
@@ -64,10 +68,8 @@ export class CraftStreamTracker {
       db.updateLastCheck('craft');
       await this.pollMinterEvents();
     } catch (err: any) {
-      if (err?.response?.status === 429) {
-        console.warn('⚠️ [UpgradeStream] TonAPI rate limit (429). Applying 6s smart backoff...');
-        await new Promise((r) => setTimeout(r, 6000));
-      } else {
+      // Rate limits are handled and logged once by the shared TON API gate.
+      if (!(err instanceof TonApiRateLimitError)) {
         console.error('⚠️ [UpgradeStream] Polling error:', err?.message || err);
       }
     } finally {
@@ -80,22 +82,18 @@ export class CraftStreamTracker {
    * Strictly filters out events older than 60s and events that happened before bot startup.
    */
   private async pollMinterEvents(): Promise<void> {
-    const headers: Record<string, string> = {
-      ...DEFAULT_HEADERS,
-      Accept: 'application/json',
-    };
-    if (this.tonApiKey) {
-      headers['Authorization'] = `Bearer ${this.tonApiKey}`;
-    }
+    if (tonApi.isCoolingDown()) return;
 
-    const url = `https://tonapi.io/v2/accounts/${FRAGMENT_GIFT_MINTER_ADDRESS}/events?limit=30`;
-    const res = await axios.get(url, { headers, timeout: 6000, httpsAgent });
-    const events = res.data?.events || [];
+    const res = await tonApi.get(
+      `/accounts/${FRAGMENT_GIFT_MINTER_ADDRESS}/events?limit=30`
+    );
+    const events = res?.events || [];
 
     const nowSec = Math.floor(Date.now() / 1000);
     const isBaseline = !db.isCraftBaselineSet();
 
     interface UpgradeCandidate {
+      craftKey: string;
       tokenName: string;
       collectionName: string;
       senderAddress: string;
@@ -125,16 +123,9 @@ export class CraftStreamTracker {
         continue;
       }
 
-      // 3. Skip already processed events
-      if (db.isCraftSeen(eventId)) {
-        continue;
-      }
-
-      // Mark event as seen immediately
-      db.markCraftSeen(eventId);
-
       // If initial baseline snapshot, do not emit historical items
       if (isBaseline) {
+        db.markCraftSeen(eventId);
         continue;
       }
 
@@ -154,6 +145,11 @@ export class CraftStreamTracker {
           const tokenName = tokenMatch[1].trim();
           const senderAddress = senderMatch ? senderMatch[1].trim() : '';
 
+          // Deduplicate per gift, not per event: an event can carry several
+          // actions, and a failed enrichment must stay retryable.
+          const craftKey = `${eventId}:${tokenName}`;
+          if (db.isCraftSeen(craftKey)) continue;
+
           let nftItemAddress = '';
           for (const a of ev.actions || []) {
             if (a.type === 'NftItemTransfer' && a.NftItemTransfer?.nft) {
@@ -163,6 +159,7 @@ export class CraftStreamTracker {
           }
 
           candidates.push({
+            craftKey,
             tokenName,
             collectionName: sc.contract?.name || 'Telegram Gift',
             senderAddress,
@@ -184,17 +181,39 @@ export class CraftStreamTracker {
       return;
     }
 
+    // A single upgrade can appear as several actions in one event batch; enrich
+    // each gift slug only once per cycle.
+    const seenSlugs = new Set<string>();
+    const uniqueCandidates = newestFirst(candidates).filter((c) => {
+      if (seenSlugs.has(c.tokenName)) return false;
+      seenSlugs.add(c.tokenName);
+      return true;
+    });
+
     // Enrich candidates in parallel for lightning speed (< 1.5s total)
-    const processing = newestFirst(candidates).map(async (c) => {
-      const upgrade = await this.enrichGiftDetails(
-          c.tokenName,
-          c.collectionName,
-          c.senderAddress,
-          c.timestamp,
-          c.nftItemAddress,
-          c.ageSec
-      );
-      if (upgrade) await this.emitCraft(upgrade);
+    const processing = uniqueCandidates.map(async (c) => {
+      try {
+        const upgrade = await this.enrichGiftDetails(
+            c.tokenName,
+            c.collectionName,
+            c.senderAddress,
+            c.timestamp,
+            c.nftItemAddress,
+            c.ageSec
+        );
+
+        // Mark only after a definitive result: a transient network failure
+        // leaves the event unmarked so the next cycle can retry it while the
+        // gift is still fresh.
+        db.markCraftSeen(c.craftKey);
+
+        if (upgrade) await this.emitCraft(upgrade);
+      } catch (err: any) {
+        console.warn(
+          `⚠️ [UpgradeStream] Will retry ${c.tokenName} next cycle:`,
+          err?.message || err
+        );
+      }
     });
 
     // Let each event notify as soon as its own enrichment completes; one slow lookup
@@ -205,26 +224,60 @@ export class CraftStreamTracker {
   /**
    * Fetches Fragment metadata for a slug. Unknown slugs return null without
    * noise so the caller can try the next candidate; transient 5xx responses
-   * get one retry.
+   * get one retry. Results (including 404s) are cached for a few minutes.
    */
   private async fetchGiftMetadata(slug: string): Promise<any | null> {
+    const cached = this.metaCache.get(slug);
+    if (cached && Date.now() - cached.at < CraftStreamTracker.META_TTL_MS) {
+      return cached.data;
+    }
+
     const url = `https://nft.fragment.com/gift/${slug}.json`;
+    let data: any | null = null;
+
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const res = await axios.get(url, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent });
-        return res.data || {};
+        data = res.data || {};
+        break;
       } catch (err: any) {
         const status = err?.response?.status;
-        if (status === 404) return null;
+        if (status === 404) {
+          data = null;
+          break;
+        }
         if (status >= 500 && attempt === 0) {
           await new Promise((resolve) => setTimeout(resolve, 400));
           continue;
         }
         console.warn(`⚠️ [UpgradeStream] Failed to load metadata for ${slug}:`, err?.message || err);
-        return null;
+        data = null;
+        break;
       }
     }
-    return null;
+
+    this.cacheMetadata(slug, data);
+    return data;
+  }
+
+  private cacheMetadata(slug: string, data: any | null): void {
+    this.metaCache.set(slug, { at: Date.now(), data });
+
+    if (this.metaCache.size > CraftStreamTracker.META_CACHE_LIMIT) {
+      const oldest = this.metaCache.keys().next().value;
+      if (oldest) this.metaCache.delete(oldest);
+    }
+  }
+
+  /** Resolves the canonical slug and its metadata from the candidate list. */
+  private async resolveGiftMetadata(
+    candidates: string[]
+  ): Promise<{ slug: string; meta: any }> {
+    for (const candidate of candidates) {
+      const meta = await this.fetchGiftMetadata(candidate);
+      if (meta) return { slug: candidate, meta };
+    }
+    return { slug: candidates[0], meta: {} };
   }
 
   /**
@@ -240,29 +293,23 @@ export class CraftStreamTracker {
     ageSec?: number
   ): Promise<UniqueCraftEvent | null> {
     try {
+      // Metadata lookup and profile validation are independent, so run them in
+      // parallel: the common path finishes in one round-trip instead of two.
       // The on-chain payload sometimes carries a typo in the collection slug
       // (e.g. joyfullbundle-5831 while Fragment serves joyfulbundle-5831), so
-      // resolve the canonical slug before validating the gift.
-      let resolvedSlug = tokenName;
-      let meta: any = null;
-      for (const candidate of giftSlugCandidates(tokenName, collectionName)) {
-        meta = await this.fetchGiftMetadata(candidate);
-        if (meta) {
-          resolvedSlug = candidate;
-          break;
-        }
-      }
-      meta = meta || {};
+      // the resolved slug is checked afterwards and validation repeated only
+      // when it actually differs.
+      const slugCandidates = giftSlugCandidates(tokenName, collectionName);
+      const [metaResult, rawResolution] = await Promise.all([
+        this.resolveGiftMetadata(slugCandidates),
+        validateProfileGift(tokenName, senderAddress, nftItemAddress, httpsAgent),
+      ]);
 
-      // Profile validation + marketplace status are authoritative and only
-      // need the resolved slug.
-      const ownerResolution = await validateProfileGift(
-        resolvedSlug,
-        senderAddress,
-        nftItemAddress,
-        this.tonApiKey,
-        httpsAgent
-      );
+      const resolvedSlug = metaResult.slug;
+      const meta = metaResult.meta;
+      const ownerResolution = resolvedSlug === tokenName
+        ? rawResolution
+        : await validateProfileGift(resolvedSlug, senderAddress, nftItemAddress, httpsAgent);
 
       // STRICT PROFILE FILTER: Watch ONLY active gifts displayed on a human user's Telegram profile!
       if (!ownerResolution.isProfileActive || !ownerResolution.telegramUserId || ownerResolution.isChannel) {
@@ -378,8 +425,8 @@ export class CraftStreamTracker {
         timestamp: new Date(timestampSec * 1000).toISOString(),
       };
     } catch (err: any) {
-      console.warn(`⚠️ [UpgradeStream] Error enriching ${tokenName}:`, err?.message || err);
-      return null;
+      // Propagate: the caller decides whether to retry on the next cycle.
+      throw new Error(`enrich ${tokenName}: ${err?.message || err}`, { cause: err });
     }
   }
 

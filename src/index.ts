@@ -57,7 +57,7 @@ async function bootstrap() {
   await mtprotoService.init();
 
   // 4. Gift upgrades stream (Fragment Gift Minter events via TonAPI)
-  const craftTracker = new CraftStreamTracker(config.CRAFT_POLL_INTERVAL_SEC, config.TONAPI_KEY);
+  const craftTracker = new CraftStreamTracker(config.CRAFT_POLL_INTERVAL_SEC);
   craftTracker.onCraft(async (craft) => {
     await notifier.broadcastCraftEvent(craft);
   });
@@ -71,7 +71,7 @@ async function bootstrap() {
   storeTracker.start();
 
   // 6. Gift sale listings on the TON blockchain
-  const listingTracker = new ListingTracker(config.MRKT_SYNC_INTERVAL_SEC, config.TONAPI_KEY);
+  const listingTracker = new ListingTracker(config.MRKT_SYNC_INTERVAL_SEC);
   listingTracker.onListing(async (listing) => {
     await notifier.broadcastListingEvent(listing);
   });

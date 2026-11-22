@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { db } from '../storage/database.js';
 import { GiftListingEvent } from '../types/gift.js';
+import { tonApi, TonApiRateLimitError } from './tonApiClient.js';
 // Known Telegram Collectible Gift Collections on TON blockchain
 export const KNOWN_GIFT_COLLECTIONS: { id: string; name: string; address: string }[] = [
   { id: 'valentine_box', name: 'Valentine Box', address: 'EQDjBdu3zS-JT94OwIup4KVNaQjxDzGcIPRJ24Ha0Y8jLw83' },
@@ -14,14 +14,12 @@ export type ListingEventCallback = (listing: GiftListingEvent) => Promise<void>;
 
 export class ListingTracker {
   private intervalSec: number;
-  private tonApiKey?: string;
   private timer: NodeJS.Timeout | null = null;
   private isChecking = false;
   private onListingCallbacks: ListingEventCallback[] = [];
 
-  constructor(intervalSec = 20, tonApiKey?: string) {
+  constructor(intervalSec = 20) {
     this.intervalSec = Math.max(10, intervalSec);
-    this.tonApiKey = tonApiKey;
   }
 
   public onListing(callback: ListingEventCallback): void {
@@ -58,21 +56,17 @@ export class ListingTracker {
   }
 
   private async pollListings(): Promise<void> {
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-    };
-    if (this.tonApiKey) {
-      headers['Authorization'] = `Bearer ${this.tonApiKey}`;
-    }
+    if (tonApi.isCoolingDown()) return;
 
     const isBaseline = !db.isListingBaselineSet();
     const newListings: GiftListingEvent[] = [];
 
     for (const col of KNOWN_GIFT_COLLECTIONS) {
       try {
-        const url = `https://tonapi.io/v2/nfts/collections/${encodeURIComponent(col.address)}/items?limit=25`;
-        const res = await axios.get(url, { headers, timeout: 8000 });
-        const items = res.data?.nft_items || [];
+        const data = await tonApi.get(
+          `/nfts/collections/${encodeURIComponent(col.address)}/items?limit=25`
+        );
+        const items = data?.nft_items || [];
 
         for (const item of items) {
           if (!item.sale) continue; // Only process items with an active sale listing
@@ -123,14 +117,18 @@ export class ListingTracker {
           let platformName = 'MRKT (МКТ)';
           let platformUrl = `https://t.me/mrkt`;
 
+          // The Fragment image URL carries the canonical gift slug
+          // (https://nft.fragment.com/gift/<slug>.webp); t.me/nft/<slug> is the
+          // only valid deep link, a collection id like "valentine_box" is not.
+          let tokenSlug = '';
+          if (metadata.image) {
+            const slugMatch = String(metadata.image).match(/gift\/([^./]+)/);
+            if (slugMatch) tokenSlug = slugMatch[1];
+          }
+
           const marketName = (sale.market?.name || '').toLowerCase();
           if (marketName.includes('fragment') || marketName.includes('teleitem')) {
             platformName = 'Fragment';
-            let tokenSlug = '';
-            if (metadata.image) {
-              const slugMatch = metadata.image.match(/gift\/([^./]+)/);
-              if (slugMatch) tokenSlug = slugMatch[1];
-            }
             platformUrl = tokenSlug ? `https://fragment.com/gift/${tokenSlug}` : 'https://fragment.com';
           } else if (marketName.includes('getgems')) {
             platformName = 'Getgems';
@@ -160,6 +158,7 @@ export class ListingTracker {
             priceTon,
             platformName,
             platformUrl,
+            telegramNftUrl: tokenSlug ? `https://t.me/nft/${tokenSlug}` : undefined,
             sellerName: sellerName || undefined,
             sellerAddress: sellerAddress || undefined,
             timestamp: new Date().toISOString(),
@@ -168,11 +167,10 @@ export class ListingTracker {
           newListings.push(listingEvent);
         }
       } catch (colErr: any) {
-        if (colErr?.response?.status === 429) {
-          console.warn(
-            `⚠️ [ListingTracker] TonAPI rate limit (429) for ${col.name}. Skipping this collection until next poll.`
-          );
-          continue;
+        if (colErr instanceof TonApiRateLimitError) {
+          // The shared gate is cooling down; stop this cycle instead of
+          // hammering the remaining collections.
+          break;
         }
         console.warn(`⚠️ [ListingTracker] Failed to poll ${col.name}:`, colErr?.message || colErr);
       }

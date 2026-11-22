@@ -23,6 +23,12 @@ export class MtprotoService {
   private client: TelegramClient | null = null;
   private isConnected = false;
 
+  /** Short-lived cache so a batch of events does not call MTProto twice per gift. */
+  private static readonly CACHE_TTL_MS = 30_000;
+  private static readonly CACHE_LIMIT = 500;
+  private giftCache = new Map<string, { at: number; value: MtprotoGiftDetails | null }>();
+  private giftInflight = new Map<string, Promise<MtprotoGiftDetails | null>>();
+
   public async init(): Promise<boolean> {
     if (!config.TELEGRAM_API_ID || !config.TELEGRAM_API_HASH) {
       console.warn(
@@ -74,9 +80,40 @@ export class MtprotoService {
   }
 
   /**
-   * Calls MTProto payments.GetUniqueStarGift to resolve owner peer, user info, and gift attributes
+   * Calls MTProto payments.GetUniqueStarGift to resolve owner peer, user info, and gift attributes.
+   * Results are cached briefly and concurrent lookups of the same slug share one request.
    */
   public async getUniqueStarGift(slug: string): Promise<MtprotoGiftDetails | null> {
+    const cached = this.giftCache.get(slug);
+    if (cached && Date.now() - cached.at < MtprotoService.CACHE_TTL_MS) {
+      return cached.value;
+    }
+
+    const inflight = this.giftInflight.get(slug);
+    if (inflight) return inflight;
+
+    const task = this.fetchUniqueStarGift(slug)
+      .then((value) => {
+        this.rememberGift(slug, value);
+        return value;
+      })
+      .finally(() => {
+        this.giftInflight.delete(slug);
+      });
+
+    this.giftInflight.set(slug, task);
+    return task;
+  }
+
+  private rememberGift(slug: string, value: MtprotoGiftDetails | null): void {
+    this.giftCache.set(slug, { at: Date.now(), value });
+    if (this.giftCache.size > MtprotoService.CACHE_LIMIT) {
+      const oldest = this.giftCache.keys().next().value;
+      if (oldest) this.giftCache.delete(oldest);
+    }
+  }
+
+  private async fetchUniqueStarGift(slug: string): Promise<MtprotoGiftDetails | null> {
     if (!this.client || !this.isConnected) return null;
 
     try {

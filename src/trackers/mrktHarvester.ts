@@ -2,26 +2,20 @@ import axios from 'axios';
 import { db } from '../storage/database.js';
 import { config } from '../config/config.js';
 import { SendPacer } from '../notifier/sendPacer.js';
+import { tonApi, TonApiRateLimitError } from './tonApiClient.js';
+
+export { parseRetryAfter } from './tonApiClient.js';
 
 const MRKT_API_URL = 'https://api.tgmrkt.io/api/v1/gifts/saling';
-const TONAPI_BASE = 'https://tonapi.io/v2';
 
-// TON API (free tier, no key) is aggressively rate limited. Resolve addresses
-// one at a time with a real delay between requests instead of firing a burst.
-const RESOLVE_MIN_INTERVAL_MS = 400;
-const MAX_RESOLVES_PER_CYCLE = 8;
+// Wallet resolution is a background nicety, not a real-time feed: it only
+// enriches owner names that MTProto usually already provides. Keep it rare and
+// cheap so it never competes with the upgrade stream for the TON API budget.
+const RESOLVE_MIN_INTERVAL_MS = 1200;
+const MAX_RESOLVES_PER_CYCLE = 3;
+const DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;
 const FAILED_TTL_MS = 10 * 60 * 1000;
 const MRKT_429_COOLDOWN_MS = 5 * 60 * 1000;
-const TONAPI_429_COOLDOWN_MS = 60 * 1000;
-
-export function parseRetryAfter(value: unknown): number | null {
-  if (value === undefined || value === null) return null;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds, 120) * 1000;
-  const date = Date.parse(String(value));
-  if (Number.isFinite(date)) return Math.min(Math.max(date - Date.now(), 0), 120_000);
-  return null;
-}
 
 export class MrktHarvester {
   private intervalSec: number;
@@ -33,8 +27,8 @@ export class MrktHarvester {
   private resolvePacer = new SendPacer(RESOLVE_MIN_INTERVAL_MS);
   private pendingResolves = new Set<string>();
   private failedResolves = new Map<string, number>();
-  private tonapiCooldownUntil = 0;
   private mrktCooldownUntil = 0;
+  private nextDiscoveryAt = 0;
 
   constructor(intervalSec = 60, authToken?: string) {
     this.intervalSec = Math.max(15, intervalSec);
@@ -106,14 +100,12 @@ export class MrktHarvester {
         }
       }
 
-      // 2. Continuous Discovery: Scan Recent Marketplace Deals & On-Chain Transfers
-      if (Date.now() < this.tonapiCooldownUntil) {
-        // TON API is cooling down after a 429; skip discovery entirely instead
-        // of poking the rate-limited endpoint on every cycle.
-      } else {
+      // 2. Occasional discovery of wallet→username mappings from recent deals.
+      if (Date.now() >= this.nextDiscoveryAt && !tonApi.isCoolingDown()) {
+        this.nextDiscoveryAt = Date.now() + DISCOVERY_INTERVAL_MS;
         try {
-          const dealsRes = await this.tonapiGetWithRetry(
-            `${TONAPI_BASE}/accounts/0:158136239adb15dd59df90c641f9efd312cfeb8664f218f4c3e5fce9d95e6c07/events?limit=25`
+          const dealsRes = await tonApi.get(
+            '/accounts/0:158136239adb15dd59df90c641f9efd312cfeb8664f218f4c3e5fce9d95e6c07/events?limit=25'
           );
 
           const addresses = new Set<string>();
@@ -135,11 +127,8 @@ export class MrktHarvester {
           const toResolve = Array.from(addresses).slice(0, MAX_RESOLVES_PER_CYCLE);
           await Promise.all(toResolve.map((addr) => this.quickResolveAndCache(addr)));
         } catch (err: any) {
-          const status = err?.response?.status;
-          if (status === 429) {
-            this.tonapiCooldownUntil = Date.now() + TONAPI_429_COOLDOWN_MS;
-            console.warn('⚠️ [MRKT Harvester] TON API rate limit (429). Skipping discovery for a minute.');
-          } else {
+          // Rate limits are handled and logged once by the shared TON API gate.
+          if (!(err instanceof TonApiRateLimitError)) {
             console.warn('⚠️ [MRKT Harvester] Failed to scan marketplace events:', err?.message || err);
           }
         }
@@ -165,12 +154,10 @@ export class MrktHarvester {
       await this.resolvePacer.run(async () => {
         // Re-check under the pacer: another cycle may have resolved it already.
         if (db.getWalletUsername(rawAddr)) return;
-        if (Date.now() < this.tonapiCooldownUntil) return;
+        if (tonApi.isCoolingDown()) return;
 
         try {
-          const acc = await this.tonapiGetWithRetry(
-            `${TONAPI_BASE}/accounts/${encodeURIComponent(rawAddr)}`
-          );
+          const acc = await tonApi.get(`/accounts/${encodeURIComponent(rawAddr)}`);
           if (acc?.name) {
             const name = acc.name.trim();
             let tgUsername: string | undefined;
@@ -185,43 +172,14 @@ export class MrktHarvester {
           }
           this.failedResolves.delete(rawAddr);
         } catch (err: any) {
-          const status = err?.response?.status;
           this.failedResolves.set(rawAddr, Date.now());
-          if (status === 429) {
-            this.tonapiCooldownUntil = Date.now() + TONAPI_429_COOLDOWN_MS;
-            console.warn('⚠️ [MRKT Harvester] TON API rate limit (429). Pausing address resolution for a minute.');
-          } else {
+          if (!(err instanceof TonApiRateLimitError)) {
             console.warn('⚠️ [MRKT Harvester] Failed to resolve wallet address:', err?.message || err);
           }
         }
       });
     } finally {
       this.pendingResolves.delete(rawAddr);
-    }
-  }
-
-  /** GET with bounded retry on 429, honouring Retry-After. */
-  private async tonapiGetWithRetry(url: string): Promise<any> {
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (config.TONAPI_KEY) {
-      headers['Authorization'] = `Bearer ${config.TONAPI_KEY}`;
-    }
-
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const res = await axios.get(url, { headers, timeout: 5000 });
-        return res.data;
-      } catch (err: any) {
-        const status = err?.response?.status;
-        if (status === 429 && attempt < 2) {
-          const retryAfter = parseRetryAfter(err?.response?.headers?.['retry-after']);
-          const waitMs = Math.max(retryAfter ?? 2000, 2000) * (attempt + 1);
-          console.warn(`⚠️ [MRKT Harvester] TON API 429, retrying in ${Math.round(waitMs / 1000)}s...`);
-          await new Promise((resolve) => setTimeout(resolve, waitMs));
-          continue;
-        }
-        throw err;
-      }
     }
   }
 }

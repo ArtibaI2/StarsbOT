@@ -2,6 +2,7 @@ import https from 'https';
 import axios from 'axios';
 import { mtprotoService, MtprotoGiftDetails } from './mtprotoClient.js';
 import { isGetgemsSale } from './marketplace.js';
+import { tonApi } from './tonApiClient.js';
 
 export interface ProfileValidationResult {
   isProfileActive: boolean;
@@ -63,25 +64,21 @@ export async function validateProfileGift(
   slug: string,
   rawSenderAddress?: string,
   nftItemAddress?: string,
-  tonApiKey?: string,
   httpsAgent?: https.Agent
 ): Promise<ProfileValidationResult> {
   let isSold = false;
   let isForSale = false;
 
   // 1. Parallel fetch: Fragment HTML, MTProto StarGift, and TonAPI NFT status
-  const tonApiHeaders: Record<string, string> = { ...DEFAULT_HEADERS, Accept: 'application/json' };
-  if (tonApiKey) tonApiHeaders['Authorization'] = `Bearer ${tonApiKey}`;
-
-  const [fragRes, mtprotoInfo, tonApiNftRes] = await Promise.all([
+  const [fragRes, mtprotoInfo, tonApiNft] = await Promise.all([
     fetchFragmentPage(slug, httpsAgent),
     mtprotoService.getUniqueStarGift(slug).catch(() => null),
     nftItemAddress
-      ? axios.get(`https://tonapi.io/v2/nfts/${encodeURIComponent(nftItemAddress)}`, { headers: tonApiHeaders, timeout: 2500, httpsAgent }).catch(() => null)
+      ? tonApi.get(`/nfts/${encodeURIComponent(nftItemAddress)}`).catch(() => null)
       : Promise.resolve(null),
   ]);
 
-  const nftMetadata = (tonApiNftRes?.data as { metadata?: { image?: unknown; name?: unknown } } | undefined)?.metadata;
+  const nftMetadata = (tonApiNft as { metadata?: { image?: unknown; name?: unknown } } | null)?.metadata;
   const nftImageUrl = typeof nftMetadata?.image === 'string' ? nftMetadata.image : undefined;
   const nftName = typeof nftMetadata?.name === 'string' ? nftMetadata.name : undefined;
 
@@ -122,8 +119,8 @@ export async function validateProfileGift(
   }
 
   // 3. TonAPI NFT Item Sale Analysis
-  if (tonApiNftRes?.data) {
-    if (isGetgemsSale(tonApiNftRes.data)) {
+  if (tonApiNft) {
+    if (isGetgemsSale(tonApiNft)) {
       isForSale = true;
     }
   }
