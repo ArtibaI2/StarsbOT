@@ -16,6 +16,10 @@ export interface ProfileValidationResult {
   isForSale: boolean;
   rejectionReason?: string;
   mtprotoInfo?: MtprotoGiftDetails | null;
+  /** Image from TonAPI metadata, used as a fallback when Fragment metadata is missing. */
+  nftImageUrl?: string;
+  /** Name from TonAPI metadata. */
+  nftName?: string;
 }
 
 const DEFAULT_HEADERS = {
@@ -23,6 +27,27 @@ const DEFAULT_HEADERS = {
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'ru,en;q=0.9',
 };
+
+/** Fetch a Fragment gift page, retrying once on transient 5xx responses. */
+async function fetchFragmentPage(slug: string, httpsAgent?: https.Agent) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await axios.get(`https://fragment.com/gift/${slug}`, {
+        headers: DEFAULT_HEADERS,
+        timeout: 3500,
+        httpsAgent,
+      });
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status >= 500 && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
+}
 
 /**
  * Validates with 100% accuracy whether a unique Telegram gift is currently
@@ -49,23 +74,27 @@ export async function validateProfileGift(
   if (tonApiKey) tonApiHeaders['Authorization'] = `Bearer ${tonApiKey}`;
 
   const [fragRes, mtprotoInfo, tonApiNftRes] = await Promise.all([
-    axios.get(`https://fragment.com/gift/${slug}`, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent }).catch(() => null),
+    fetchFragmentPage(slug, httpsAgent),
     mtprotoService.getUniqueStarGift(slug).catch(() => null),
     nftItemAddress
       ? axios.get(`https://tonapi.io/v2/nfts/${encodeURIComponent(nftItemAddress)}`, { headers: tonApiHeaders, timeout: 2500, httpsAgent }).catch(() => null)
       : Promise.resolve(null),
   ]);
 
+  const nftMetadata = (tonApiNftRes?.data as { metadata?: { image?: unknown; name?: unknown } } | undefined)?.metadata;
+  const nftImageUrl = typeof nftMetadata?.image === 'string' ? nftMetadata.image : undefined;
+  const nftName = typeof nftMetadata?.name === 'string' ? nftMetadata.name : undefined;
+
   let fragmentOwnerRaw: string | undefined;
 
   // 2. Fragment Analysis (fallback only; MTProto/TonAPI are authoritative)
-  if (fragRes?.data) {
+  if (fragRes?.status === 200 && typeof fragRes.data === 'string') {
     const html = fragRes.data;
 
     const statusMatch = html.match(/<span class="tm-section-header-status[^>]*>([^<]+)<\/span>/i);
     const statusText = statusMatch ? statusMatch[1].trim() : '';
 
-    if (!statusMatch) {
+    if (!statusMatch && !mtprotoInfo) {
       console.warn(
         `⚠️ [ProfileValidator] Could not parse Fragment status for ${slug}; page structure may have changed.`
       );
@@ -85,7 +114,7 @@ export async function validateProfileGift(
       if (shortMatch && shortMatch[1]) {
         fragmentOwnerRaw = shortMatch[1].trim();
       }
-    } else {
+    } else if (!mtprotoInfo) {
       console.warn(
         `⚠️ [ProfileValidator] Could not parse Fragment owner for ${slug}; page structure may have changed.`
       );
@@ -166,6 +195,8 @@ export async function validateProfileGift(
         isSold: false,
         isForSale: false,
         mtprotoInfo,
+        nftImageUrl,
+        nftName,
       };
     }
 

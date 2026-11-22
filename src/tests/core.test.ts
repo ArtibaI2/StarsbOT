@@ -141,3 +141,42 @@ test('formatCraftMessage escapes special characters and preserves HTML tags safe
   assert.ok(message.includes('&lt;Dangerous Gift &amp; Co&gt;'), 'Title must be safely escaped');
   assert.ok(message.includes('👤 Находится в профиле Telegram'), 'Status must indicate profile');
 });
+
+test('parseRetryAfter handles seconds, HTTP dates and invalid values', async () => {
+  const { parseRetryAfter } = await import('../trackers/mrktHarvester.js');
+
+  assert.equal(parseRetryAfter('5'), 5000);
+  assert.equal(parseRetryAfter('0'), 0);
+  assert.equal(parseRetryAfter(undefined), null);
+  assert.equal(parseRetryAfter(null), null);
+  assert.equal(parseRetryAfter('not-a-date'), null);
+  assert.equal(parseRetryAfter('999'), 120_000, 'Retry-After must be capped at 120s');
+
+  const future = new Date(Date.now() + 5000).toUTCString();
+  const parsed = parseRetryAfter(future);
+  assert.ok(parsed !== null && parsed > 0 && parsed <= 120_000);
+});
+
+test('gift slug candidates recover on-chain collection name typos', async () => {
+  const { giftSlugCandidates, normalizeGiftSlug } = await import('../trackers/giftSlug.js');
+
+  assert.equal(normalizeGiftSlug('Joyful Bundle'), 'joyfulbundle');
+  assert.equal(normalizeGiftSlug('Snoop Cigar'), 'snoopcigar');
+  assert.equal(normalizeGiftSlug('Telegram Gift'), 'telegramgift');
+
+  assert.deepEqual(
+    giftSlugCandidates('joyfullbundle-5831', 'Joyful Bundle'),
+    ['joyfullbundle-5831', 'joyfulbundle-5831'],
+    'The raw token name is tried first, then the normalized collection slug'
+  );
+  assert.deepEqual(
+    giftSlugCandidates('plushpepe-1330', 'Plush Pepe'),
+    ['plushpepe-1330'],
+    'Well-formed token names must not produce duplicate candidates'
+  );
+  assert.deepEqual(
+    giftSlugCandidates('unknown-1', 'Telegram Gift'),
+    ['unknown-1'],
+    'The generic fallback collection must not be used as a slug'
+  );
+});

@@ -4,6 +4,7 @@ import { db } from '../storage/database.js';
 import { UniqueCraftEvent } from '../types/gift.js';
 import { newestFirst } from './marketplace.js';
 import { validateProfileGift } from './profileValidator.js';
+import { giftSlugCandidates } from './giftSlug.js';
 
 export type CraftEventCallback = (craft: UniqueCraftEvent) => Promise<void>;
 
@@ -202,6 +203,31 @@ export class CraftStreamTracker {
   }
 
   /**
+   * Fetches Fragment metadata for a slug. Unknown slugs return null without
+   * noise so the caller can try the next candidate; transient 5xx responses
+   * get one retry.
+   */
+  private async fetchGiftMetadata(slug: string): Promise<any | null> {
+    const url = `https://nft.fragment.com/gift/${slug}.json`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await axios.get(url, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent });
+        return res.data || {};
+      } catch (err: any) {
+        const status = err?.response?.status;
+        if (status === 404) return null;
+        if (status >= 500 && attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          continue;
+        }
+        console.warn(`⚠️ [UpgradeStream] Failed to load metadata for ${slug}:`, err?.message || err);
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Fetches metadata, owner and status with parallel queries.
    * Discards gifts that are already sold / unavailable and not active on a user profile.
    */
@@ -214,25 +240,35 @@ export class CraftStreamTracker {
     ageSec?: number
   ): Promise<UniqueCraftEvent | null> {
     try {
-      const metaUrl = `https://nft.fragment.com/gift/${tokenName}.json`;
+      // The on-chain payload sometimes carries a typo in the collection slug
+      // (e.g. joyfullbundle-5831 while Fragment serves joyfulbundle-5831), so
+      // resolve the canonical slug before validating the gift.
+      let resolvedSlug = tokenName;
+      let meta: any = null;
+      for (const candidate of giftSlugCandidates(tokenName, collectionName)) {
+        meta = await this.fetchGiftMetadata(candidate);
+        if (meta) {
+          resolvedSlug = candidate;
+          break;
+        }
+      }
+      meta = meta || {};
 
-      // Parallel execution: Metadata + 100% Comprehensive Multi-Layer Profile Validation
-      const [metaRes, ownerResolution] = await Promise.all([
-        axios
-          .get(metaUrl, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent })
-          .catch((err: any) => {
-            console.warn(`⚠️ [UpgradeStream] Failed to load metadata for ${tokenName}:`, err?.message || err);
-            return { data: {} };
-          }),
-        validateProfileGift(tokenName, senderAddress, nftItemAddress, this.tonApiKey, httpsAgent),
-      ]);
+      // Profile validation + marketplace status are authoritative and only
+      // need the resolved slug.
+      const ownerResolution = await validateProfileGift(
+        resolvedSlug,
+        senderAddress,
+        nftItemAddress,
+        this.tonApiKey,
+        httpsAgent
+      );
 
       // STRICT PROFILE FILTER: Watch ONLY active gifts displayed on a human user's Telegram profile!
       if (!ownerResolution.isProfileActive || !ownerResolution.telegramUserId || ownerResolution.isChannel) {
         return null;
       }
 
-      const meta = metaRes.data || {};
       const attributes = Array.isArray(meta.attributes) ? meta.attributes : [];
       const getAttr = (name: string): { value: string; rarity?: string } => {
         const found = attributes.find(
@@ -261,7 +297,7 @@ export class CraftStreamTracker {
 
       let num = ownerResolution.mtprotoInfo?.num || 0;
       if (!num) {
-        const numMatch = (meta.name || tokenName).match(/#?\s*(\d+)$/);
+        const numMatch = (meta.name || resolvedSlug).match(/#?\s*(\d+)$/);
         if (numMatch) {
           num = parseInt(numMatch[1], 10);
         }
@@ -296,10 +332,19 @@ export class CraftStreamTracker {
         marketStatus = 'ON_PROFILE';
       }
 
+      const metaTitle = typeof meta.name === 'string'
+        ? meta.name.replace(/\s*#\d+\s*$/, '').trim()
+        : '';
+      const giftTitle =
+        (collectionName && collectionName !== 'Telegram Gift' ? collectionName : '') ||
+        ownerResolution.mtprotoInfo?.giftTitle ||
+        metaTitle ||
+        'Telegram Gift';
+
       return {
-        id: `upgrade_${tokenName}`,
-        giftId: tokenName,
-        giftTitle: collectionName || meta.name || 'Telegram Gift',
+        id: `upgrade_${resolvedSlug}`,
+        giftId: resolvedSlug,
+        giftTitle,
         num,
         modelName,
         modelRarity,
@@ -309,7 +354,10 @@ export class CraftStreamTracker {
         symbolRarity,
         rarityLevel,
         description: meta.description,
-        imageUrl: meta.image || `https://nft.fragment.com/gift/${tokenName}.webp`,
+        imageUrl:
+          meta.image ||
+          ownerResolution.nftImageUrl ||
+          `https://nft.fragment.com/gift/${resolvedSlug}.webp`,
         lottieUrl: meta.lottie,
         ownerName: ownerResolution.displayName,
         ownerAddress: ownerResolution.userFriendlyAddress || senderAddress,
@@ -321,9 +369,9 @@ export class CraftStreamTracker {
         ageSec,
         marketStatus,
         platformName: 'Telegram / MRKT / Fragment',
-        platformUrl: `https://fragment.com/gift/${tokenName}`,
-        telegramNftUrl: `https://t.me/nft/${tokenName}`,
-        fragmentUrl: `https://fragment.com/gift/${tokenName}`,
+        platformUrl: `https://fragment.com/gift/${resolvedSlug}`,
+        telegramNftUrl: `https://t.me/nft/${resolvedSlug}`,
+        fragmentUrl: `https://fragment.com/gift/${resolvedSlug}`,
         mrktUrl: `https://t.me/mrkt`,
         getgemsUrl: nftItemAddress ? `https://getgems.io/nft/${nftItemAddress}` : `https://getgems.io`,
         tonviewerUrl: effectiveTonviewer,
