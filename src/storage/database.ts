@@ -103,7 +103,9 @@ export class Database {
   public saveSync(): void {
     try {
       const tempPath = `${this.filePath}.tmp.${Date.now()}`;
-      fs.writeFileSync(tempPath, JSON.stringify(this.data, null, 2), 'utf-8');
+      // Compact JSON: this file is rewritten on every poll cycle, and
+      // pretty-printing nearly doubled the bytes written to disk.
+      fs.writeFileSync(tempPath, JSON.stringify(this.data), 'utf-8');
       fs.renameSync(tempPath, this.filePath);
     } catch (err) {
       console.error('❌ Error saving database:', err);
