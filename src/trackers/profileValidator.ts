@@ -132,8 +132,11 @@ export async function validateProfileGift(
     }
   }
 
-  // Reject if already listed for sale on marketplace
-  if (isForSale) {
+  // Fragment's status badge describes the auction, not current ownership: a
+  // unique gift kept on a profile still shows "Sold"/"Unavailable". Only use
+  // these signals as a fallback when MTProto could not answer; otherwise they
+  // would reject every profile gift before the authoritative check below.
+  if (!mtprotoInfo && isForSale) {
     const disp = fragmentOwnerRaw || 'На маркетплейсе';
     return {
       isProfileActive: false,
@@ -148,8 +151,8 @@ export async function validateProfileGift(
     };
   }
 
-  // Reject if sold on Fragment
-  if (isSold) {
+  // Reject if sold on Fragment (fallback only, see above)
+  if (!mtprotoInfo && isSold) {
     const disp = fragmentOwnerRaw || 'Продан на Fragment';
     return {
       isProfileActive: false,
