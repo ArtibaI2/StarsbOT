@@ -1,6 +1,10 @@
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import { db, isAdmin } from '../storage/database.js';
 import { Notifier } from '../notifier/notifier.js';
+import { config } from '../config/config.js';
+
+/** Detection latency = poll interval + enrichment time. */
+const DETECTION_WINDOW_SEC = Math.max(3, config.CRAFT_POLL_INTERVAL_SEC + 2);
 
 function matchText(ctx: Context): string {
   return typeof ctx.match === 'string' ? ctx.match.trim() : '';
@@ -67,7 +71,7 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
       `Я бот для <b>мгновенного отслеживания улучшений подарков в Telegram (Real-Time)</b>!`,
       '',
       `⚡️ <b>Как это работает:</b>`,
-      `Как только кто-либо улучшает подарок в Telegram (в профиле или на блокчейне), бот за <b>3–5 секунд</b> присылает карточку:`,
+      `Как только кто-либо улучшает подарок у себя в профиле, бот за <b>3–${DETECTION_WINDOW_SEC} секунд</b> присылает карточку:`,
       `  • 🖼 Фотография и модель подарка`,
       `  • 🏷 Название, номер и редкость`,
       `  • 👤 Ник улучшившего (или канал)`,
@@ -117,7 +121,7 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
     const text = [
       '📊 <b>Статус работы бота:</b>',
       '',
-      `🟢 <b>Состояние:</b> Онлайн (Real-Time мониторинг каждые 3 сек)`,
+      `🟢 <b>Состояние:</b> Онлайн (Real-Time мониторинг каждые ${config.CRAFT_POLL_INTERVAL_SEC} сек)`,
       `⏱️ <b>Аптайм:</b> ${hours} ч. ${mins} мин.`,
       `👥 <b>Всего пользователей:</b> ${stats.totalSubscribers}`,
       `🔐 <b>Режим подписок:</b> ${stats.subscriptionSystemEnabled ? 'Включен' : 'Отключен (открытый доступ)'}`,

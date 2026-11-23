@@ -19,6 +19,12 @@ export interface MtprotoGiftDetails {
   symbolRarity?: string;
 }
 
+/** Telegram DC hiccups (INTERDC_*_CALL_RICH_ERROR, FLOOD, timeouts) that clear on retry. */
+function isTransientMtprotoError(err: any): boolean {
+  const text = String(err?.errorMessage || err?.message || err || '');
+  return /INTERDC|FLOOD|TIMEOUT|ECONN|CONNECTION|Internal|RICH_ERROR|^500\b/i.test(text);
+}
+
 export class MtprotoService {
   private client: TelegramClient | null = null;
   private isConnected = false;
@@ -26,8 +32,10 @@ export class MtprotoService {
   /** Short-lived cache so a batch of events does not call MTProto twice per gift. */
   private static readonly CACHE_TTL_MS = 30_000;
   private static readonly CACHE_LIMIT = 500;
+  private static readonly ERROR_LOG_INTERVAL_MS = 60_000;
   private giftCache = new Map<string, { at: number; value: MtprotoGiftDetails | null }>();
   private giftInflight = new Map<string, Promise<MtprotoGiftDetails | null>>();
+  private lastErrorLogAt = 0;
 
   public async init(): Promise<boolean> {
     if (!config.TELEGRAM_API_ID || !config.TELEGRAM_API_HASH) {
@@ -97,6 +105,9 @@ export class MtprotoService {
         this.rememberGift(slug, value);
         return value;
       })
+      // Transient failures are not cached: the next cycle should retry instead
+      // of treating the gift as "unknown" for the whole TTL.
+      .catch(() => null)
       .finally(() => {
         this.giftInflight.delete(slug);
       });
@@ -116,13 +127,28 @@ export class MtprotoService {
   private async fetchUniqueStarGift(slug: string): Promise<MtprotoGiftDetails | null> {
     if (!this.client || !this.isConnected) return null;
 
-    try {
-      const res: any = await this.client.invoke(
-        new Api.payments.GetUniqueStarGift({ slug })
-      );
+    let res: any;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        res = await this.client.invoke(new Api.payments.GetUniqueStarGift({ slug }));
+        break;
+      } catch (err: any) {
+        // INTERDC_*_CALL_RICH_ERROR is a transient Telegram-side 500 that
+        // succeeds on a second attempt; retry once, then surface the error
+        // (uncached) so the caller can fall back to Fragment for this cycle.
+        if (attempt === 0 && isTransientMtprotoError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          continue;
+        }
+        this.logLookupError(slug, err);
+        throw err;
+      }
+    }
 
-      if (!res) return null;
+    if (!res) return null;
 
+    // Flatten the MTProto response into the shape used by the validators.
+    {
       const gift = res.gift;
       let username: string | undefined;
       let userId: number | undefined;
@@ -234,10 +260,18 @@ export class MtprotoService {
         symbolName,
         symbolRarity,
       };
-    } catch (err: any) {
-      console.warn(`⚠️ [MTProto] getUniqueStarGift failed for ${slug}:`, err?.message || err);
-      return null;
     }
+  }
+
+  /** One warning per minute: a flaky Telegram DC must not flood the console. */
+  private logLookupError(slug: string, err: any): void {
+    const now = Date.now();
+    if (now - this.lastErrorLogAt < MtprotoService.ERROR_LOG_INTERVAL_MS) return;
+    this.lastErrorLogAt = now;
+    console.warn(
+      `⚠️ [MTProto] getUniqueStarGift failed for ${slug}:`,
+      err?.errorMessage || err?.message || err
+    );
   }
 
   public getClient(): TelegramClient | null {

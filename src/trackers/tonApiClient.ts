@@ -3,14 +3,21 @@ import { config } from '../config/config.js';
 
 const TONAPI_BASE = 'https://tonapi.io/v2';
 
-/** Free tier allows roughly one request per second; a key raises the budget. */
-const MIN_INTERVAL_WITH_KEY_MS = 120;
+/**
+ * TON API is a leaky bucket: cheap endpoints (events, collection items) tolerate
+ * short bursts, but heavier ones (nft item lookups) start returning 429 after
+ * ~3 rapid calls even with an API key. Keep a conservative sustained pace
+ * (~1 req/s) so a batch of lookups can never drain the bucket.
+ */
+const MIN_INTERVAL_WITH_KEY_MS = 1000;
 const MIN_INTERVAL_WITHOUT_KEY_MS = 1100;
 
 const BASE_COOLDOWN_MS = 30_000;
 const MAX_COOLDOWN_MS = 5 * 60_000;
 const RETRY_AFTER_CAP_MS = 120_000;
 const COOLDOWN_LOG_INTERVAL_MS = 30_000;
+/** A burst of successes does not prove the limit is gone; wait before resetting. */
+const CLEAN_PERIOD_BEFORE_RESET_MS = 3 * 60_000;
 
 export class TonApiRateLimitError extends Error {
   constructor(public readonly retryAfterMs: number) {
@@ -46,7 +53,9 @@ export class TonApiClient {
   private nextStartAt = 0;
   private cooldownUntil = 0;
   private consecutive429 = 0;
+  private last429At = 0;
   private lastCooldownLogAt = 0;
+  private clearLogged = false;
 
   private get minIntervalMs(): number {
     return config.TONAPI_KEY ? MIN_INTERVAL_WITH_KEY_MS : MIN_INTERVAL_WITHOUT_KEY_MS;
@@ -123,17 +132,20 @@ export class TonApiClient {
   }
 
   private onRateLimit(retryAfterHeader: unknown): void {
+    const now = Date.now();
     this.consecutive429++;
+    this.last429At = now;
+    this.clearLogged = false;
 
     const backoff = Math.min(BASE_COOLDOWN_MS * 2 ** (this.consecutive429 - 1), MAX_COOLDOWN_MS);
     const retryAfter = parseRetryAfter(retryAfterHeader) ?? 0;
     const waitMs = Math.max(backoff, retryAfter);
 
-    this.cooldownUntil = Date.now() + waitMs;
+    this.cooldownUntil = now + waitMs;
 
     // One line per cooldown window instead of one per failed request.
-    if (Date.now() - this.lastCooldownLogAt > COOLDOWN_LOG_INTERVAL_MS) {
-      this.lastCooldownLogAt = Date.now();
+    if (now - this.lastCooldownLogAt > COOLDOWN_LOG_INTERVAL_MS) {
+      this.lastCooldownLogAt = now;
       console.warn(
         `⚠️ [TON API] Rate limit (429). Pausing all TON API calls for ${Math.ceil(waitMs / 1000)}s ` +
           `(attempt ${this.consecutive429}).`
@@ -142,11 +154,18 @@ export class TonApiClient {
   }
 
   private onSuccess(): void {
-    if (this.consecutive429 > 0) {
-      console.log('✅ [TON API] Rate limit cleared, resuming normal polling.');
-      this.consecutive429 = 0;
-    }
     this.cooldownUntil = 0;
+
+    // Do not drop the backoff on the first success: the bucket may still be
+    // nearly empty and the next lookup would trip the limiter again. Reset only
+    // after a sustained clean period.
+    if (this.consecutive429 > 0 && Date.now() - this.last429At > CLEAN_PERIOD_BEFORE_RESET_MS) {
+      this.consecutive429 = 0;
+      if (!this.clearLogged) {
+        this.clearLogged = true;
+        console.log('✅ [TON API] Rate limit cleared, resuming normal polling.');
+      }
+    }
   }
 }
 

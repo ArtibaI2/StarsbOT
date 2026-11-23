@@ -69,14 +69,21 @@ export async function validateProfileGift(
   let isSold = false;
   let isForSale = false;
 
-  // 1. Parallel fetch: Fragment HTML, MTProto StarGift, and TonAPI NFT status
-  const [fragRes, mtprotoInfo, tonApiNft] = await Promise.all([
+  // 1. Parallel fetch: Fragment HTML and MTProto StarGift.
+  const [fragRes, mtprotoInfo] = await Promise.all([
     fetchFragmentPage(slug, httpsAgent),
     mtprotoService.getUniqueStarGift(slug).catch(() => null),
-    nftItemAddress
-      ? tonApi.get(`/nfts/${encodeURIComponent(nftItemAddress)}`).catch(() => null)
-      : Promise.resolve(null),
   ]);
+
+  // 2. TonAPI NFT lookup is only a fallback. It is the most heavily rate
+  // limited endpoint, and when MTProto answered we already have authoritative
+  // ownership: an exported or listed gift carries ownerAddress and never
+  // reaches the profile-active branch below. Skipping it keeps the hot path
+  // to one cheap request per upgrade.
+  const tonApiNft =
+    nftItemAddress && !mtprotoInfo
+      ? await tonApi.get(`/nfts/${encodeURIComponent(nftItemAddress)}`).catch(() => null)
+      : null;
 
   const nftMetadata = (tonApiNft as { metadata?: { image?: unknown; name?: unknown } } | null)?.metadata;
   const nftImageUrl = typeof nftMetadata?.image === 'string' ? nftMetadata.image : undefined;
@@ -84,7 +91,7 @@ export async function validateProfileGift(
 
   let fragmentOwnerRaw: string | undefined;
 
-  // 2. Fragment Analysis (fallback only; MTProto/TonAPI are authoritative)
+  // 3. Fragment Analysis (fallback only; MTProto/TonAPI are authoritative)
   if (fragRes?.status === 200 && typeof fragRes.data === 'string') {
     const html = fragRes.data;
 
@@ -118,7 +125,7 @@ export async function validateProfileGift(
     }
   }
 
-  // 3. TonAPI NFT Item Sale Analysis
+  // 4. TonAPI NFT Item Sale Analysis (only when MTProto had no answer)
   if (tonApiNft) {
     if (isGetgemsSale(tonApiNft)) {
       isForSale = true;
@@ -157,7 +164,7 @@ export async function validateProfileGift(
     };
   }
 
-  // 4. MTProto Authoritative Ground Truth Check
+  // 5. MTProto Authoritative Ground Truth Check
   if (mtprotoInfo) {
     // If gift is on a channel
     if (mtprotoInfo.isChannel) {
@@ -215,7 +222,7 @@ export async function validateProfileGift(
     }
   }
 
-  // 5. Fallback if MTProto is unavailable: Check Fragment Owner
+  // 6. Fallback if MTProto is unavailable: Check Fragment Owner
   if (fragmentOwnerRaw) {
     // If owner is a TON address (UQ... or EQ... or .ton domain)
     if (/^(UQ|EQ)[a-zA-Z0-9_-]{46,48}$/.test(fragmentOwnerRaw) || fragmentOwnerRaw.endsWith('.ton')) {
