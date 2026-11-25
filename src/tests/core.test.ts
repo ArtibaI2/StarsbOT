@@ -50,6 +50,19 @@ test('newest events are ordered first', () => {
   assert.deepEqual(ordered.map((event) => event.timestamp), [30, 20, 10]);
 });
 
+test('craft cursor only advances past fully processed events', async () => {
+  const { nextCraftCursor } = await import('../trackers/craftCursor.js');
+
+  assert.equal(nextCraftCursor(undefined, [], []), undefined);
+  assert.equal(nextCraftCursor(100, [], []), 100, 'an empty page keeps the cursor');
+  assert.equal(nextCraftCursor(undefined, [10, 20, 30], []), 30, 'a fresh stream starts at the newest event');
+  assert.equal(nextCraftCursor(10, [20, 30], []), 30, 'the cursor advances to the newest fetched event');
+  assert.equal(nextCraftCursor(50, [20, 30], []), 50, 'the cursor never moves backwards');
+  assert.equal(nextCraftCursor(10, [20, 30], [20]), 10, 'a failure at the oldest fetched event pins the cursor');
+  assert.equal(nextCraftCursor(10, [20, 30, 40], [40]), 30, 'the cursor stops just before the oldest failure');
+  assert.equal(nextCraftCursor(10, [20, 30], [11]), 10, 'a failure older than the page still blocks progress');
+});
+
 test('onlyProfileUpgrades filter rejects gifts not on profile', () => {
   assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: false, ownerTelegramUsername: undefined }), false);
   assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: true }), true);

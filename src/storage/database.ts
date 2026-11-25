@@ -13,6 +13,8 @@ interface DatabaseSchema {
   seenListingIds: string[]; // Store last N seen sale listing IDs
   isCraftBaselineInitialized?: boolean;
   isListingBaselineInitialized?: boolean;
+  /** Logical time of the newest fully processed minter event (cursor pagination). */
+  craftCursorLt?: number;
   subscriptionSystemEnabled?: boolean; // Global subscription mode toggle
   walletMappings?: Record<string, { username: string; source: string; updatedAt: string }>;
   stats: {
@@ -85,6 +87,10 @@ export class Database {
           walletMappings:
             record.walletMappings && typeof record.walletMappings === 'object' ? record.walletMappings : {},
           subscriptionSystemEnabled: Boolean(record.subscriptionSystemEnabled),
+          craftCursorLt:
+            typeof record.craftCursorLt === 'number' && Number.isFinite(record.craftCursorLt)
+              ? record.craftCursorLt
+              : undefined,
           stats: {
             ...DEFAULT_DB.stats,
             ...(record.stats && typeof record.stats === 'object' ? record.stats : {}),
@@ -318,6 +324,23 @@ export class Database {
       this.data.seenCraftIds = this.data.seenCraftIds.slice(-10000);
       this.seenCraftIdSet = new Set(this.data.seenCraftIds);
     }
+    this.scheduleSave();
+  }
+
+  /**
+   * Cursor (logical time) of the newest minter event whose gift was fully
+   * processed. The tracker resumes from it instead of re-reading the latest
+   * page, so bursts larger than one page cannot push events out of reach.
+   */
+  public getCraftCursorLt(): number | undefined {
+    const lt = this.data.craftCursorLt;
+    return typeof lt === 'number' && Number.isFinite(lt) ? lt : undefined;
+  }
+
+  public setCraftCursorLt(lt: number): void {
+    if (!Number.isFinite(lt)) return;
+    if (this.data.craftCursorLt === lt) return;
+    this.data.craftCursorLt = lt;
     this.scheduleSave();
   }
 

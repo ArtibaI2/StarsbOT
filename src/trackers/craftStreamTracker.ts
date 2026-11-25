@@ -6,6 +6,7 @@ import { newestFirst } from './marketplace.js';
 import { validateProfileGift } from './profileValidator.js';
 import { giftSlugCandidates } from './giftSlug.js';
 import { tonApi, TonApiRateLimitError } from './tonApiClient.js';
+import { nextCraftCursor } from './craftCursor.js';
 
 export type CraftEventCallback = (craft: UniqueCraftEvent) => Promise<void>;
 
@@ -77,6 +78,73 @@ export class CraftStreamTracker {
     }
   }
 
+  /** TON API caps the event page size at 100. */
+  private static readonly EVENT_PAGE_LIMIT = 100;
+  /** Extra pages drained per cycle so bursts cannot scroll out of reach. */
+  private static readonly EVENT_MAX_PAGES = 3;
+
+  private buildEventsPath(beforeLt?: number): string {
+    const params = new URLSearchParams();
+    params.set('limit', String(CraftStreamTracker.EVENT_PAGE_LIMIT));
+    // `before_lt` walks the feed backwards, so a burst larger than one page is
+    // drained page by page instead of letting newer events replace older ones.
+    if (beforeLt !== undefined) {
+      params.set('before_lt', String(beforeLt));
+    }
+    return `/accounts/${FRAGMENT_GIFT_MINTER_ADDRESS}/events?${params.toString()}`;
+  }
+
+  /**
+   * Reads the newest minter events and, when the stored cursor is further back
+   * than one page, walks back with `before_lt` until the cursor is reached or
+   * EVENT_MAX_PAGES is exhausted. A rate limit stops pagination and keeps the
+   * pages already fetched; the cursor only moves once those events are processed.
+   */
+  private async fetchMinterEvents(cursor?: number): Promise<any[]> {
+    let collected: any[] = [];
+    let beforeLt: number | undefined;
+
+    for (let page = 0; page < CraftStreamTracker.EVENT_MAX_PAGES; page++) {
+      if (tonApi.isCoolingDown()) break;
+
+      let res: any;
+      try {
+        res = await tonApi.get(this.buildEventsPath(beforeLt));
+      } catch (err) {
+        if (err instanceof TonApiRateLimitError) break;
+        throw err;
+      }
+
+      const batch: any[] = Array.isArray(res?.events) ? res.events : [];
+      if (batch.length === 0) break;
+
+      batch.sort((a, b) => Number(a?.lt) - Number(b?.lt));
+      collected = [...batch, ...collected];
+
+      const oldest = Number(batch[0]?.lt);
+      if (!Number.isFinite(oldest)) break;
+      if (cursor === undefined) break;
+      if (oldest <= cursor) break;
+      if (batch.length < CraftStreamTracker.EVENT_PAGE_LIMIT) break;
+      beforeLt = oldest;
+    }
+
+    return cursor === undefined
+      ? collected
+      : collected.filter((ev) => Number(ev?.lt) > cursor);
+  }
+
+  private advanceCursor(
+    previous: number | undefined,
+    fetchedLts: number[],
+    failedLts: number[]
+  ): void {
+    const next = nextCraftCursor(previous, fetchedLts, failedLts);
+    if (next !== undefined && next !== previous) {
+      db.setCraftCursorLt(next);
+    }
+  }
+
   /**
    * Polls Fragment Gift Minter contract events for real-time gift upgrades.
    * Strictly filters out events older than 60s and events that happened before bot startup.
@@ -84,13 +152,14 @@ export class CraftStreamTracker {
   private async pollMinterEvents(): Promise<void> {
     if (tonApi.isCoolingDown()) return;
 
-    const res = await tonApi.get(
-      `/accounts/${FRAGMENT_GIFT_MINTER_ADDRESS}/events?limit=30`
-    );
-    const events = res?.events || [];
+    const storedCursor = db.getCraftCursorLt();
+    const isBaseline = !db.isCraftBaselineSet();
+    const events = await this.fetchMinterEvents(storedCursor);
+    const fetchedLts = events
+      .map((ev) => Number(ev.lt))
+      .filter((lt) => Number.isFinite(lt));
 
     const nowSec = Math.floor(Date.now() / 1000);
-    const isBaseline = !db.isCraftBaselineSet();
 
     interface UpgradeCandidate {
       craftKey: string;
@@ -100,6 +169,7 @@ export class CraftStreamTracker {
       timestamp: number;
       nftItemAddress?: string;
       ageSec: number;
+      eventLt: number;
     }
 
     const candidates: UpgradeCandidate[] = [];
@@ -110,6 +180,7 @@ export class CraftStreamTracker {
 
       const eventTimestamp = Number(ev.timestamp || 0);
       const ageSec = Math.max(0, nowSec - eventTimestamp);
+      const eventLt = Number(ev.lt);
 
       // 1. STRICT LATENCY FILTER: Discard any events older than 35 seconds (prevents notifying about already sold items)
       if (ageSec > 35) {
@@ -166,6 +237,7 @@ export class CraftStreamTracker {
             timestamp: eventTimestamp,
             nftItemAddress,
             ageSec,
+            eventLt,
           });
         }
       }
@@ -173,11 +245,15 @@ export class CraftStreamTracker {
 
     if (isBaseline) {
       db.setCraftBaseline();
+      if (fetchedLts.length > 0) {
+        db.setCraftCursorLt(Math.max(...fetchedLts));
+      }
       console.log('✅ [UpgradeStream] Baseline snapshot initialized at startup. Streaming fresh real-time upgrades (< 60s)!');
       return;
     }
 
     if (candidates.length === 0) {
+      this.advanceCursor(storedCursor, fetchedLts, []);
       return;
     }
 
@@ -191,6 +267,7 @@ export class CraftStreamTracker {
     });
 
     // Enrich candidates in parallel for lightning speed (< 1.5s total)
+    const failedLts: number[] = [];
     const processing = uniqueCandidates.map(async (c) => {
       try {
         const upgrade = await this.enrichGiftDetails(
@@ -209,6 +286,7 @@ export class CraftStreamTracker {
 
         if (upgrade) await this.emitCraft(upgrade);
       } catch (err: any) {
+        failedLts.push(c.eventLt);
         console.warn(
           `⚠️ [UpgradeStream] Will retry ${c.tokenName} next cycle:`,
           err?.message || err
@@ -219,6 +297,10 @@ export class CraftStreamTracker {
     // Let each event notify as soon as its own enrichment completes; one slow lookup
     // no longer holds every other fresh upgrade in the batch.
     await Promise.allSettled(processing);
+
+    // Move the cursor past everything that was handled; a failure pins it just
+    // before that event so it is fetched again instead of being skipped.
+    this.advanceCursor(storedCursor, fetchedLts, failedLts);
   }
 
   /**
