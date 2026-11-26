@@ -39,6 +39,26 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function isTransientTonApiError(err: any): boolean {
+  const status = err?.response?.status;
+  if (typeof status === 'number' && status >= 500) return true;
+
+  const code = String(err?.code || '');
+  if (
+    code === 'ECONNRESET' ||
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ENOTFOUND' ||
+    code === 'EPIPE'
+  ) {
+    return true;
+  }
+
+  const msg = String(err?.message || '').toLowerCase();
+  return msg === 'aborted' || msg.includes('socket hang up') || msg.includes('timeout');
+}
+
 /**
  * Single gate for every tonapi.io request in the process.
  *
@@ -106,9 +126,9 @@ export class TonApiClient {
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (config.TONAPI_KEY) headers['Authorization'] = `Bearer ${config.TONAPI_KEY}`;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const res = await axios.get(url, { headers, timeout: 6000 });
+        const res = await axios.get(url, { headers, timeout: 12000 });
         this.onSuccess();
         return res.data as T;
       } catch (err: any) {
@@ -119,8 +139,8 @@ export class TonApiClient {
           throw new TonApiRateLimitError(this.cooldownRemainingMs());
         }
 
-        if (typeof status === 'number' && status >= 500 && attempt === 0) {
-          await delay(600);
+        if (isTransientTonApiError(err) && attempt < 2) {
+          await delay(600 * (attempt + 1));
           continue;
         }
 

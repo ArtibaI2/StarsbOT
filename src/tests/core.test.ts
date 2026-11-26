@@ -289,3 +289,14 @@ test('StoreUpgradeTracker reads official Bot API upgrade_star_count field', asyn
   assert.equal(nonUpgradeable.canUpgrade, false);
   assert.equal(nonUpgradeable.upgradeStars, undefined);
 });
+
+test('isTransientTonApiError detects aborted sockets, timeouts, and 5xx', async () => {
+  const { isTransientTonApiError } = await import('../trackers/tonApiClient.js');
+
+  assert.equal(isTransientTonApiError({ message: 'aborted' }), true);
+  assert.equal(isTransientTonApiError({ code: 'ECONNRESET' }), true);
+  assert.equal(isTransientTonApiError({ code: 'ETIMEDOUT' }), true);
+  assert.equal(isTransientTonApiError({ response: { status: 502 } }), true);
+  assert.equal(isTransientTonApiError({ response: { status: 404 } }), false);
+  assert.equal(isTransientTonApiError({ response: { status: 429 } }), false);
+});

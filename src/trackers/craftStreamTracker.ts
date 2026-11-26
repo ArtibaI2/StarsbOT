@@ -316,9 +316,9 @@ export class CraftStreamTracker {
   }
 
   /**
-   * Fetches Fragment metadata for a slug. Unknown slugs return null without
-   * noise so the caller can try the next candidate; transient 5xx responses
-   * get one retry. Results (including 404s) are cached for a few minutes.
+   * Fetches Fragment metadata for a slug. Unknown slugs (404) return null without
+   * noise so the caller can try the next candidate; transient 5xx / network
+   * errors are retried and NEVER cached so the next cycle can still fetch them.
    */
   private async fetchGiftMetadata(slug: string): Promise<any | null> {
     const cached = this.metaCache.get(slug);
@@ -328,20 +328,30 @@ export class CraftStreamTracker {
 
     const url = `https://nft.fragment.com/gift/${slug}.json`;
     let data: any | null = null;
+    let shouldCache = false;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const res = await axios.get(url, { headers: DEFAULT_HEADERS, timeout: 3500, httpsAgent });
+        const res = await axios.get(url, { headers: DEFAULT_HEADERS, timeout: 5000, httpsAgent });
         data = res.data || {};
+        shouldCache = true;
         break;
       } catch (err: any) {
         const status = err?.response?.status;
         if (status === 404) {
           data = null;
+          shouldCache = true;
           break;
         }
-        if (status >= 500 && attempt === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 400));
+        const isTransient =
+          !status ||
+          status >= 500 ||
+          err?.message === 'aborted' ||
+          err?.code === 'ECONNRESET' ||
+          err?.code === 'ECONNABORTED' ||
+          err?.code === 'ETIMEDOUT';
+        if (isTransient && attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
           continue;
         }
         console.warn(`⚠️ [UpgradeStream] Failed to load metadata for ${slug}:`, err?.message || err);
@@ -350,7 +360,9 @@ export class CraftStreamTracker {
       }
     }
 
-    this.cacheMetadata(slug, data);
+    if (shouldCache) {
+      this.cacheMetadata(slug, data);
+    }
     return data;
   }
 

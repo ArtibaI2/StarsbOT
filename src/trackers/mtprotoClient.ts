@@ -1,4 +1,5 @@
-import { TelegramClient, Api } from 'telegram';
+import { TelegramClient, Api, Logger } from 'telegram';
+import { LogLevel } from 'telegram/extensions/Logger.js';
 import { StringSession } from 'telegram/sessions/index.js';
 import { config } from '../config/config.js';
 
@@ -60,8 +61,14 @@ export class MtprotoService {
 
     try {
       const session = new StringSession(config.TELEGRAM_SESSION);
+      // Suppress GramJS's verbose internal ping/reconnect stack traces; our RPC
+      // wrapper already logs real lookup errors once per minute.
+      const baseLogger = new Logger(LogLevel.NONE);
       this.client = new TelegramClient(session, apiId, apiHash, {
         connectionRetries: 5,
+        retryDelay: 2000,
+        autoReconnect: true,
+        baseLogger,
       });
 
       console.log('⏳ [MTProto] Connecting with a user session...');
