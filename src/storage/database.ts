@@ -3,7 +3,7 @@ import path from 'path';
 import { UserSubscription, BotStatistics } from '../types/user.js';
 import { TelegramGift } from '../types/gift.js';
 import { resolvedDataDir } from '../config/config.js';
-import { hasSubscriptionAccess, isAdmin } from './access.js';
+import { hasPaidSubscriptionRecord, hasSubscriptionAccess, isAdmin } from './access.js';
 export { ADMIN_IDS, isAdmin } from './access.js';
 
 interface DatabaseSchema {
@@ -107,14 +107,22 @@ export class Database {
    * Save database atomically using temp file and rename
    */
   public saveSync(): void {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+
+    const tempPath = `${this.filePath}.tmp.${Date.now()}`;
     try {
-      const tempPath = `${this.filePath}.tmp.${Date.now()}`;
       // Compact JSON: this file is rewritten on every poll cycle, and
       // pretty-printing nearly doubled the bytes written to disk.
       fs.writeFileSync(tempPath, JSON.stringify(this.data), 'utf-8');
       fs.renameSync(tempPath, this.filePath);
     } catch (err) {
       console.error('❌ Error saving database:', err);
+      try {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch {}
     }
   }
 
@@ -148,6 +156,10 @@ export class Database {
       Boolean(this.data.subscriptionSystemEnabled),
       this.data.subscribers[chatId.toString()]
     );
+  }
+
+  public hasPaidSubscription(chatId: number): boolean {
+    return hasPaidSubscriptionRecord(this.data.subscribers[chatId.toString()]);
   }
 
   public grantSubscription(chatId: number, durationDays?: number): void {
@@ -215,7 +227,7 @@ export class Database {
         createdAt: now,
         notifyUpgrades: true,
         notifyCrafts: true,
-        notifyListings: true,
+        notifyListings: false,
         onlyProfileUpgrades: true,
         filterChannels: 'ALL',
         filterGetgems: 'ALL',
@@ -276,6 +288,18 @@ export class Database {
   public hasActiveGetgemsFilters(): boolean {
     return this.getActiveSubscribers('crafts').some(
       (subscriber) => subscriber.filterGetgems === 'EXCLUDE_GETGEMS' || subscriber.filterGetgems === 'ONLY_GETGEMS'
+    );
+  }
+
+  public hasSubscribersWantingNonProfile(): boolean {
+    return this.getActiveSubscribers('crafts').some(
+      (subscriber) => subscriber.onlyProfileUpgrades === false || subscriber.filterGetgems === 'ONLY_GETGEMS'
+    );
+  }
+
+  public hasSubscribersWantingChannels(): boolean {
+    return this.getActiveSubscribers('crafts').some(
+      (subscriber) => subscriber.onlyProfileUpgrades === false && subscriber.filterChannels !== 'ONLY_USERS'
     );
   }
 
@@ -428,16 +452,16 @@ export class Database {
   public getStatistics(): BotStatistics {
     const subs = Object.values(this.data.subscribers);
     const active = subs.filter((s) => !s.isBlocked);
-    const paid = subs.filter((s) => this.hasActiveSubscription(s.chatId) && !isAdmin(s.chatId));
+    const paid = subs.filter((s) => this.hasPaidSubscription(s.chatId) && !isAdmin(s.chatId));
 
     return {
       totalSubscribers: subs.length,
       activeSubscribersCount: active.length,
       paidSubscribersCount: paid.length,
       subscriptionSystemEnabled: Boolean(this.data.subscriptionSystemEnabled),
-      activeUpgradesSubscribers: active.filter((s) => s.notifyUpgrades).length,
-      activeCraftsSubscribers: active.filter((s) => s.notifyCrafts).length,
-      activeListingsSubscribers: active.filter((s) => s.notifyListings).length,
+      activeUpgradesSubscribers: this.getActiveSubscribers('upgrades').length,
+      activeCraftsSubscribers: this.getActiveSubscribers('crafts').length,
+      activeListingsSubscribers: this.getActiveSubscribers('listings').length,
       totalUpgradeEventsSent: this.data.stats.totalUpgradeEventsSent,
       totalCraftEventsSent: this.data.stats.totalCraftEventsSent,
       totalListingEventsSent: this.data.stats.totalListingEventsSent,

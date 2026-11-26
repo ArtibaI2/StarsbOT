@@ -174,22 +174,27 @@ export class CraftStreamTracker {
 
     const candidates: UpgradeCandidate[] = [];
 
+    const maxAgeSec = Math.max(90, this.intervalSec * 4);
+    const minTimestampSec = this.botStartedAtSec - 30;
+
     for (const ev of events) {
       const eventId = ev.event_id;
       if (!eventId) continue;
+      if (db.isCraftSeen(eventId)) continue;
 
       const eventTimestamp = Number(ev.timestamp || 0);
       const ageSec = Math.max(0, nowSec - eventTimestamp);
       const eventLt = Number(ev.lt);
 
-      // 1. STRICT LATENCY FILTER: Discard any events older than 35 seconds (prevents notifying about already sold items)
-      if (ageSec > 35) {
+      // 1. LATENCY FILTER: Scale window with poll interval so TON indexing +
+      // one retry cycle never drops a valid fresh upgrade.
+      if (ageSec > maxAgeSec) {
         db.markCraftSeen(eventId);
         continue;
       }
 
       // 2. Discard events that took place before bot started (e.g. on container restart)
-      if (eventTimestamp < this.botStartedAtSec - 15) {
+      if (eventTimestamp < minTimestampSec) {
         db.markCraftSeen(eventId);
         continue;
       }
@@ -266,37 +271,44 @@ export class CraftStreamTracker {
       return true;
     });
 
-    // Enrich candidates in parallel for lightning speed (< 1.5s total)
+    // Enrich candidates with bounded concurrency to protect MTProto and Fragment
+    // against FLOOD_WAIT / rate limits during upgrade bursts.
     const failedLts: number[] = [];
-    const processing = uniqueCandidates.map(async (c) => {
-      try {
-        const upgrade = await this.enrichGiftDetails(
-            c.tokenName,
-            c.collectionName,
-            c.senderAddress,
-            c.timestamp,
-            c.nftItemAddress,
-            c.ageSec
-        );
+    const queue = [...uniqueCandidates];
+    const workerCount = Math.min(3, queue.length);
 
-        // Mark only after a definitive result: a transient network failure
-        // leaves the event unmarked so the next cycle can retry it while the
-        // gift is still fresh.
-        db.markCraftSeen(c.craftKey);
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (queue.length > 0) {
+          const c = queue.shift();
+          if (!c) break;
 
-        if (upgrade) await this.emitCraft(upgrade);
-      } catch (err: any) {
-        failedLts.push(c.eventLt);
-        console.warn(
-          `⚠️ [UpgradeStream] Will retry ${c.tokenName} next cycle:`,
-          err?.message || err
-        );
-      }
-    });
+          try {
+            const upgrade = await this.enrichGiftDetails(
+              c.tokenName,
+              c.collectionName,
+              c.senderAddress,
+              c.timestamp,
+              c.nftItemAddress,
+              c.ageSec
+            );
 
-    // Let each event notify as soon as its own enrichment completes; one slow lookup
-    // no longer holds every other fresh upgrade in the batch.
-    await Promise.allSettled(processing);
+            // Mark only after a definitive result: a transient network failure
+            // leaves the event unmarked so the next cycle can retry it while the
+            // gift is still fresh.
+            db.markCraftSeen(c.craftKey);
+
+            if (upgrade) await this.emitCraft(upgrade);
+          } catch (err: any) {
+            failedLts.push(c.eventLt);
+            console.warn(
+              `⚠️ [UpgradeStream] Will retry ${c.tokenName} next cycle:`,
+              err?.message || err
+            );
+          }
+        }
+      })
+    );
 
     // Move the cursor past everything that was handled; a failure pins it just
     // before that event so it is fetched again instead of being skipped.
@@ -381,21 +393,31 @@ export class CraftStreamTracker {
       // (e.g. joyfullbundle-5831 while Fragment serves joyfulbundle-5831), so
       // the resolved slug is checked afterwards and validation repeated only
       // when it actually differs.
+      const wantsNonProfile = db.hasSubscribersWantingNonProfile();
+      const wantsChannels = db.hasSubscribersWantingChannels();
+      const checkGetgems = Boolean(wantsNonProfile && db.hasActiveGetgemsFilters());
+
       const slugCandidates = giftSlugCandidates(tokenName, collectionName);
       const [metaResult, rawResolution] = await Promise.all([
         this.resolveGiftMetadata(slugCandidates),
-        validateProfileGift(tokenName, senderAddress, nftItemAddress, httpsAgent),
+        validateProfileGift(tokenName, senderAddress, nftItemAddress, httpsAgent, checkGetgems),
       ]);
 
       const resolvedSlug = metaResult.slug;
       const meta = metaResult.meta;
       const ownerResolution = resolvedSlug === tokenName
         ? rawResolution
-        : await validateProfileGift(resolvedSlug, senderAddress, nftItemAddress, httpsAgent);
+        : await validateProfileGift(resolvedSlug, senderAddress, nftItemAddress, httpsAgent, checkGetgems);
 
-      // STRICT PROFILE FILTER: Watch ONLY active gifts displayed on a human user's Telegram profile!
-      if (!ownerResolution.isProfileActive || !ownerResolution.telegramUserId || ownerResolution.isChannel) {
-        return null;
+      // Default: watch ONLY active gifts displayed on a human user's Telegram profile.
+      // Only allow channel or non-profile gifts through if at least one active
+      // subscriber explicitly opted into them via /settings.
+      if (!ownerResolution.isProfileActive) {
+        if (ownerResolution.isChannel) {
+          if (!wantsChannels) return null;
+        } else if (!wantsNonProfile) {
+          return null;
+        }
       }
 
       const attributes = Array.isArray(meta.attributes) ? meta.attributes : [];
@@ -452,7 +474,7 @@ export class CraftStreamTracker {
 
       const isUpgradedOnProfile = ownerResolution.isProfileActive;
       const isChannel = ownerResolution.isChannel;
-      const isOnGetgems = ownerResolution.isForSale;
+      const isOnGetgems = ownerResolution.isOnGetgems;
 
       let marketStatus: 'FOR_SALE' | 'ON_PROFILE' | 'JUST_MINTED' = 'JUST_MINTED';
       if (ownerResolution.isForSale) {

@@ -4,7 +4,7 @@ import { GiftListingEvent, GiftUpgradeEvent, TelegramGift, UniqueCraftEvent } fr
 import { matchesCraftFilters } from './craftFilters.js';
 import { SendPacer } from './sendPacer.js';
 
-function escapeHtml(text?: string): string {
+export function escapeHtml(text?: string): string {
   if (!text) return '';
   return text
     .replace(/&/g, '&amp;')

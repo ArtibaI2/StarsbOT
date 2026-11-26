@@ -17,6 +17,7 @@ export class ListingTracker {
   private timer: NodeJS.Timeout | null = null;
   private isChecking = false;
   private onListingCallbacks: ListingEventCallback[] = [];
+  private collectionOffsets = new Map<string, number>();
 
   constructor(intervalSec = 20) {
     this.intervalSec = Math.max(10, intervalSec);
@@ -59,14 +60,24 @@ export class ListingTracker {
     if (tonApi.isCoolingDown()) return;
 
     const isBaseline = !db.isListingBaselineSet();
+    // Skip TonAPI collection scans when no subscriber wants sale listings.
+    if (!isBaseline && db.getActiveSubscribers('listings').length === 0) {
+      return;
+    }
+
+    const pageSize = 50;
+    const maxOffset = 500;
     const newListings: GiftListingEvent[] = [];
 
     for (const col of KNOWN_GIFT_COLLECTIONS) {
       try {
+        const offset = isBaseline ? 0 : (this.collectionOffsets.get(col.address) ?? 0);
         const data = await tonApi.get(
-          `/nfts/collections/${encodeURIComponent(col.address)}/items?limit=25`
+          `/nfts/collections/${encodeURIComponent(col.address)}/items?limit=${pageSize}&offset=${offset}`
         );
         const items = data?.nft_items || [];
+        const nextOffset = items.length < pageSize || offset + pageSize >= maxOffset ? 0 : offset + pageSize;
+        this.collectionOffsets.set(col.address, nextOffset);
 
         for (const item of items) {
           if (!item.sale) continue; // Only process items with an active sale listing

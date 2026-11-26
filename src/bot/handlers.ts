@@ -1,6 +1,6 @@
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import { db, isAdmin } from '../storage/database.js';
-import { Notifier } from '../notifier/notifier.js';
+import { escapeHtml, Notifier } from '../notifier/notifier.js';
 import { config } from '../config/config.js';
 
 /** Detection latency = poll interval + enrichment time. */
@@ -12,16 +12,70 @@ function matchText(ctx: Context): string {
 
 const BROADCAST_CONFIRM_TTL_MS = 60_000;
 
+function buildLockPayload(userId: number, firstName?: string): { text: string; keyboard: InlineKeyboard } {
+  const safeName = escapeHtml(firstName) || 'друг';
+  const text = [
+    `👋 <b>Привет, ${safeName}!</b>`,
+    '',
+    `🔐 <b>В боте включен закрытый доступ по подписке.</b>`,
+    '',
+    `У вас пока нет активной подписки на мониторинг улучшений подарков.`,
+    '',
+    `Для получения доступа обратитесь к администраторам бота.`,
+    '',
+    `ℹ️ <i>Ваш Telegram ID:</i> <code>${userId}</code> (сообщите его админу для активации)`,
+  ].join('\n');
+
+  const keyboard = new InlineKeyboard()
+    .text('🔑 Проверить статус подписки', 'my_subscription')
+    .row()
+    .text('📊 Статус бота', 'view_status');
+
+  return { text, keyboard };
+}
+
+function buildMainMenuKeyboard(isUserAdmin: boolean): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+    .text('🧪 Пример уведомления', 'send_test')
+    .text('⚙️ Фильтры и настройки', 'view_settings')
+    .row()
+    .text('📊 Статус бота', 'view_status')
+    .text('🔑 Моя подписка', 'my_subscription');
+
+  if (isUserAdmin) {
+    keyboard.row().text('👑 Панель Администратора', 'admin_panel');
+  }
+  return keyboard;
+}
+
 export function setupHandlers(bot: Bot, notifier: Notifier): void {
   // Pending broadcasts awaiting explicit confirmation, keyed by admin user id.
   const pendingBroadcasts = new Map<number, { text: string; createdAt: number }>();
+
+  async function requireSubscriptionAccess(ctx: Context): Promise<boolean> {
+    if (!ctx.chat || !ctx.from) return false;
+    if (isAdmin(ctx.from.id)) return true;
+    if (!db.isSubscriptionSystemEnabled() || db.hasActiveSubscription(ctx.chat.id)) {
+      return true;
+    }
+
+    const { text, keyboard } = buildLockPayload(ctx.from.id, ctx.from.first_name);
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard });
+        return false;
+      } catch {}
+    }
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
+    return false;
+  }
 
   // /start command
   bot.command('start', async (ctx: Context) => {
     if (!ctx.chat || !ctx.from) return;
 
     const existing = db.getSubscriber(ctx.chat.id);
-    const user = db.upsertSubscriber({
+    db.upsertSubscriber({
       chatId: ctx.chat.id,
       userId: ctx.from.id,
       username: ctx.from.username,
@@ -35,38 +89,13 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
       minRarity: existing?.minRarity ?? 'ALL',
     });
 
-    const isUserAdmin = isAdmin(ctx.from.id);
-    const isSubActive = db.hasActiveSubscription(ctx.chat.id);
-    const subSystemEnabled = db.isSubscriptionSystemEnabled();
-
-    // If subscription system is enabled and user has NO subscription
-    if (subSystemEnabled && !isSubActive && !isUserAdmin) {
-      const lockText = [
-        `👋 <b>Привет, ${ctx.from.first_name || 'друг'}!</b>`,
-        '',
-        `🔐 <b>В боте включен закрытый доступ по подписке.</b>`,
-        '',
-        `У вас пока нет активной подписки на мониторинг улучшений подарков.`,
-        '',
-        `Для получения доступа обратитесь к администраторам бота.`,
-        '',
-        `ℹ️ <i>Ваш Telegram ID:</i> <code>${ctx.from.id}</code> (сообщите его админу для активации)`,
-      ].join('\n');
-
-      const lockKeyboard = new InlineKeyboard()
-        .text('🔑 Проверить статус подписки', 'my_subscription')
-        .row()
-        .text('📊 Статус бота', 'view_status');
-
-      await ctx.reply(lockText, {
-        parse_mode: 'HTML',
-        reply_markup: lockKeyboard,
-      });
+    if (!(await requireSubscriptionAccess(ctx))) {
       return;
     }
 
+    const safeName = escapeHtml(ctx.from.first_name) || 'друг';
     const text = [
-      `👋 <b>Привет, ${ctx.from.first_name || 'друг'}!</b>`,
+      `👋 <b>Привет, ${safeName}!</b>`,
       '',
       `Я бот для <b>мгновенного отслеживания улучшений подарков в Telegram (Real-Time)</b>!`,
       '',
@@ -81,20 +110,9 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
       `✅ <b>Вы подписаны на обновления!</b>`,
     ].join('\n');
 
-    const keyboard = new InlineKeyboard()
-      .text('🧪 Пример уведомления', 'send_test')
-      .text('⚙️ Фильтры и настройки', 'view_settings')
-      .row()
-      .text('📊 Статус бота', 'view_status')
-      .text('🔑 Моя подписка', 'my_subscription');
-
-    if (isUserAdmin) {
-      keyboard.row().text('👑 Панель Администратора', 'admin_panel');
-    }
-
     await ctx.reply(text, {
       parse_mode: 'HTML',
-      reply_markup: keyboard,
+      reply_markup: buildMainMenuKeyboard(isAdmin(ctx.from.id)),
     });
   });
 
@@ -146,6 +164,7 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
 
   async function handleViewSettings(ctx: Context): Promise<void> {
     if (!ctx.chat?.id) return;
+    if (!(await requireSubscriptionAccess(ctx))) return;
     const sub = db.getSubscriber(ctx.chat.id);
 
     const channelsMode = sub?.filterChannels || 'ALL';
@@ -193,6 +212,10 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
   // Toggle Channel filter callback
   bot.callbackQuery('toggle_filter_channels', async (ctx: Context) => {
     if (!ctx.chat?.id) return;
+    if (!(await requireSubscriptionAccess(ctx))) {
+      await ctx.answerCallbackQuery({ text: 'Требуется активная подписка' });
+      return;
+    }
     const sub = db.getSubscriber(ctx.chat.id);
     const cur = sub?.filterChannels || 'ALL';
 
@@ -209,6 +232,10 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
   // Toggle Getgems filter callback
   bot.callbackQuery('toggle_filter_getgems', async (ctx: Context) => {
     if (!ctx.chat?.id) return;
+    if (!(await requireSubscriptionAccess(ctx))) {
+      await ctx.answerCallbackQuery({ text: 'Требуется активная подписка' });
+      return;
+    }
     const sub = db.getSubscriber(ctx.chat.id);
     const cur = sub?.filterGetgems || 'ALL';
 
@@ -225,6 +252,10 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
   // Toggle Profile filter callback
   bot.callbackQuery('toggle_only_profile', async (ctx: Context) => {
     if (!ctx.chat?.id) return;
+    if (!(await requireSubscriptionAccess(ctx))) {
+      await ctx.answerCallbackQuery({ text: 'Требуется активная подписка' });
+      return;
+    }
     const sub = db.getSubscriber(ctx.chat.id);
     const cur = sub?.onlyProfileUpgrades !== false;
     db.updatePreferences(ctx.chat.id, { onlyProfileUpgrades: !cur });
@@ -272,24 +303,15 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
   bot.callbackQuery('back_to_menu', async (ctx: Context) => {
     await ctx.answerCallbackQuery();
     if (!ctx.chat?.id || !ctx.from) return;
+    if (!(await requireSubscriptionAccess(ctx))) return;
 
-    const isUserAdmin = isAdmin(ctx.from.id);
     const text = [
       `👋 <b>Главное меню StarsBot</b>`,
       '',
       `Выберите нужный раздел:`,
     ].join('\n');
 
-    const keyboard = new InlineKeyboard()
-      .text('🧪 Пример уведомления', 'send_test')
-      .text('⚙️ Фильтры и настройки', 'view_settings')
-      .row()
-      .text('📊 Статус бота', 'view_status')
-      .text('🔑 Моя подписка', 'my_subscription');
-
-    if (isUserAdmin) {
-      keyboard.row().text('👑 Панель Администратора', 'admin_panel');
-    }
+    const keyboard = buildMainMenuKeyboard(isAdmin(ctx.from.id));
 
     if (ctx.callbackQuery) {
       try {
@@ -436,19 +458,27 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
     }
 
     const parts = matchText(ctx).split(/\s+/).filter(Boolean);
-    if (!parts[0]) {
+    if (!parts[0] || !/^\d+$/.test(parts[0])) {
       await ctx.reply('⚠️ Формат: <code>/sub_add &lt;user_id&gt; [дней|forever]</code>', { parse_mode: 'HTML' });
       return;
     }
 
-    const targetId = parseInt(parts[0], 10);
-    if (isNaN(targetId)) {
+    const targetId = Number(parts[0]);
+    if (!Number.isSafeInteger(targetId) || targetId <= 0) {
       await ctx.reply('❌ Неверный ID пользователя.');
       return;
     }
 
     const durationArg = parts[1] ? parts[1].toLowerCase() : '30';
-    const days = durationArg === 'forever' ? 0 : parseInt(durationArg, 10) || 30;
+    let days: number;
+    if (durationArg === 'forever') {
+      days = 0;
+    } else if (/^\d+$/.test(durationArg) && Number(durationArg) > 0) {
+      days = Number(durationArg);
+    } else {
+      await ctx.reply('⚠️ Неверный срок. Укажите число дней (например 30) или <code>forever</code>.', { parse_mode: 'HTML' });
+      return;
+    }
 
     db.grantSubscription(targetId, days);
 
@@ -473,8 +503,12 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
     }
 
     const targetStr = matchText(ctx);
-    const targetId = parseInt(targetStr, 10);
-    if (isNaN(targetId)) {
+    if (!/^\d+$/.test(targetStr)) {
+      await ctx.reply('⚠️ Формат: <code>/sub_remove &lt;user_id&gt;</code>', { parse_mode: 'HTML' });
+      return;
+    }
+    const targetId = Number(targetStr);
+    if (!Number.isSafeInteger(targetId) || targetId <= 0) {
       await ctx.reply('⚠️ Формат: <code>/sub_remove &lt;user_id&gt;</code>', { parse_mode: 'HTML' });
       return;
     }
@@ -505,7 +539,7 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
     if (!ctx.from || !isAdmin(ctx.from.id)) return;
 
     const all = db.getAllSubscribers();
-    const paid = all.filter((s) => db.hasActiveSubscription(s.chatId) && !isAdmin(s.chatId));
+    const paid = all.filter((s) => db.hasPaidSubscription(s.chatId) && !isAdmin(s.chatId));
 
     if (paid.length === 0) {
       await ctx.reply('📋 В данный момент нет пользователей с отдельной платной подпиской.');
@@ -517,8 +551,8 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
       const exp = p.subscriptionExpiresAt === 'forever'
         ? 'навсегда'
         : (p.subscriptionExpiresAt ? new Date(p.subscriptionExpiresAt).toLocaleDateString('ru-RU') : 'активна');
-      const name = p.username ? `@${p.username}` : (p.firstName || `ID ${p.chatId}`);
-      lines.push(`• <b>${name}</b> (<code>${p.chatId}</code>): до ${exp}`);
+      const rawName = p.username ? `@${p.username}` : (p.firstName || `ID ${p.chatId}`);
+      lines.push(`• <b>${escapeHtml(rawName)}</b> (<code>${p.chatId}</code>): до ${exp}`);
     }
 
     if (paid.length > 30) {
@@ -614,6 +648,7 @@ export function setupHandlers(bot: Bot, notifier: Notifier): void {
 
   async function handleSendTest(ctx: Context): Promise<void> {
     if (!ctx.chat?.id) return;
+    if (!(await requireSubscriptionAccess(ctx))) return;
 
     await ctx.reply('🧪 Отправляю пример уведомления об улучшении подарка...', { parse_mode: 'HTML' });
 

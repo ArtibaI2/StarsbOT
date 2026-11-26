@@ -10,7 +10,44 @@ export interface RawApiGift {
   star_count: number;
   total_count?: number;
   remaining_count?: number;
+  /** Official Telegram Bot API 8.0+ field on Gift */
+  upgrade_star_count?: number;
+  /** Legacy/MTProto fallback name kept for compatibility */
   upgrade_stars?: number;
+}
+
+export function mapRawGiftToTelegramGift(
+  raw: RawApiGift,
+  existing: TelegramGift | undefined,
+  now = new Date().toISOString()
+): TelegramGift {
+  const giftId = raw.id.toString();
+  const upgradeStars =
+    typeof raw.upgrade_star_count === 'number' ? raw.upgrade_star_count : raw.upgrade_stars;
+  const canUpgrade = typeof upgradeStars === 'number' && upgradeStars >= 0;
+
+  return {
+    id: giftId,
+    stickerFileId: raw.sticker?.file_id,
+    starCount: raw.star_count,
+    totalCount: raw.total_count,
+    remainingCount: raw.remaining_count,
+    upgradeStars,
+    canUpgrade,
+    firstSeenAt: existing?.firstSeenAt || now,
+    lastUpdatedAt: now,
+  };
+}
+
+function hasGiftChanged(existing: TelegramGift, current: TelegramGift): boolean {
+  return (
+    existing.stickerFileId !== current.stickerFileId ||
+    existing.starCount !== current.starCount ||
+    existing.totalCount !== current.totalCount ||
+    existing.remainingCount !== current.remainingCount ||
+    existing.upgradeStars !== current.upgradeStars ||
+    existing.canUpgrade !== current.canUpgrade
+  );
 }
 
 export type UpgradeEventCallback = (event: GiftUpgradeEvent, gift: TelegramGift) => Promise<void>;
@@ -113,7 +150,7 @@ export class StoreUpgradeTracker {
   /**
    * Compare previous state with fresh API state and emit events
    */
-  private async processGifts(rawGifts: RawApiGift[]): Promise<void> {
+  public async processGifts(rawGifts: RawApiGift[]): Promise<void> {
     const known = db.getKnownGifts();
     const isFirstRun = Object.keys(known).length === 0;
     const now = new Date().toISOString();
@@ -121,19 +158,8 @@ export class StoreUpgradeTracker {
     for (const raw of rawGifts) {
       const giftId = raw.id.toString();
       const existing = known[giftId];
-      const canUpgrade = typeof raw.upgrade_stars === 'number' && raw.upgrade_stars >= 0;
-
-      const currentGift: TelegramGift = {
-        id: giftId,
-        stickerFileId: raw.sticker?.file_id,
-        starCount: raw.star_count,
-        totalCount: raw.total_count,
-        remainingCount: raw.remaining_count,
-        upgradeStars: raw.upgrade_stars,
-        canUpgrade,
-        firstSeenAt: existing?.firstSeenAt || now,
-        lastUpdatedAt: now,
-      };
+      const currentGift = mapRawGiftToTelegramGift(raw, existing, now);
+      const canUpgrade = currentGift.canUpgrade;
 
       if (isFirstRun) {
         // Save initial state without broadcasting massive alerts
@@ -223,8 +249,10 @@ export class StoreUpgradeTracker {
         }
       }
 
-      // Update cached gift record
-      db.setKnownGift(currentGift);
+      // Persist only when gift state actually changed to avoid writing the DB every 30s.
+      if (hasGiftChanged(existing, currentGift)) {
+        db.setKnownGift(currentGift);
+      }
     }
   }
 

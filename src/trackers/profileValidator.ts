@@ -15,6 +15,7 @@ export interface ProfileValidationResult {
   isChannel: boolean;
   isSold: boolean;
   isForSale: boolean;
+  isOnGetgems: boolean;
   rejectionReason?: string;
   mtprotoInfo?: MtprotoGiftDetails | null;
   /** Image from TonAPI metadata, used as a fallback when Fragment metadata is missing. */
@@ -64,10 +65,12 @@ export async function validateProfileGift(
   slug: string,
   rawSenderAddress?: string,
   nftItemAddress?: string,
-  httpsAgent?: https.Agent
+  httpsAgent?: https.Agent,
+  checkGetgemsOnExported = false
 ): Promise<ProfileValidationResult> {
   let isSold = false;
   let isForSale = false;
+  let isOnGetgems = false;
 
   // 1. Parallel fetch: Fragment HTML and MTProto StarGift.
   const [fragRes, mtprotoInfo] = await Promise.all([
@@ -75,13 +78,13 @@ export async function validateProfileGift(
     mtprotoService.getUniqueStarGift(slug).catch(() => null),
   ]);
 
-  // 2. TonAPI NFT lookup is only a fallback. It is the most heavily rate
-  // limited endpoint, and when MTProto answered we already have authoritative
-  // ownership: an exported or listed gift carries ownerAddress and never
-  // reaches the profile-active branch below. Skipping it keeps the hot path
-  // to one cheap request per upgrade.
+  // 2. TonAPI NFT lookup is normally only a fallback when MTProto did not answer.
+  // When an exported gift has ownerAddress AND a subscriber explicitly enabled
+  // Getgems filtering, we also check TonAPI NFT sale state so Getgems listings
+  // are accurately tagged without flooding TonAPI on normal profile gifts.
+  const needsGetgemsLookup = Boolean(checkGetgemsOnExported && mtprotoInfo?.ownerAddress);
   const tonApiNft =
-    nftItemAddress && !mtprotoInfo
+    nftItemAddress && (!mtprotoInfo || needsGetgemsLookup)
       ? await tonApi.get(`/nfts/${encodeURIComponent(nftItemAddress)}`).catch(() => null)
       : null;
 
@@ -125,10 +128,11 @@ export async function validateProfileGift(
     }
   }
 
-  // 4. TonAPI NFT Item Sale Analysis (only when MTProto had no answer)
+  // 4. TonAPI NFT Item Sale Analysis
   if (tonApiNft) {
     if (isGetgemsSale(tonApiNft)) {
       isForSale = true;
+      isOnGetgems = true;
     }
   }
 
@@ -146,8 +150,11 @@ export async function validateProfileGift(
       isChannel: false,
       isSold: false,
       isForSale: true,
+      isOnGetgems,
       rejectionReason: 'Gift is currently listed for sale on marketplace (Fragment/Getgems)',
       mtprotoInfo,
+      nftImageUrl,
+      nftName,
     };
   }
 
@@ -162,8 +169,11 @@ export async function validateProfileGift(
       isChannel: false,
       isSold: true,
       isForSale: false,
+      isOnGetgems,
       rejectionReason: 'Gift is marked as Sold on Fragment',
       mtprotoInfo,
+      nftImageUrl,
+      nftName,
     };
   }
 
@@ -182,6 +192,7 @@ export async function validateProfileGift(
         isChannel: true,
         isSold,
         isForSale,
+        isOnGetgems: false,
         rejectionReason: 'Gift is on a Telegram Channel, not a personal user profile',
         mtprotoInfo,
       };
@@ -201,6 +212,7 @@ export async function validateProfileGift(
         isChannel: false,
         isSold: false,
         isForSale: false,
+        isOnGetgems: false,
         mtprotoInfo,
         nftImageUrl,
         nftName,
@@ -219,8 +231,11 @@ export async function validateProfileGift(
         isChannel: false,
         isSold,
         isForSale,
+        isOnGetgems,
         rejectionReason: 'Gift is exported to TON blockchain address and detached from Telegram profile',
         mtprotoInfo,
+        nftImageUrl,
+        nftName,
       };
     }
   }
@@ -238,8 +253,11 @@ export async function validateProfileGift(
         isChannel: false,
         isSold,
         isForSale,
+        isOnGetgems,
         rejectionReason: 'Fragment owner is a cold TON wallet address, not an active Telegram profile',
         mtprotoInfo,
+        nftImageUrl,
+        nftName,
       };
     }
   }
@@ -254,7 +272,10 @@ export async function validateProfileGift(
     isChannel: false,
     isSold,
     isForSale,
+    isOnGetgems,
     rejectionReason: 'Could not verify active profile ownership',
     mtprotoInfo,
+    nftImageUrl,
+    nftName,
   };
 }

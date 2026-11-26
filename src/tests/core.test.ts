@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { config } from '../config/config.js';
 import { matchesCraftFilters } from '../notifier/craftFilters.js';
-import { hasSubscriptionAccess, isAdmin } from '../storage/access.js';
+import { hasPaidSubscriptionRecord, hasSubscriptionAccess, isAdmin } from '../storage/access.js';
 import { isGetgemsSale, newestFirst } from '../trackers/marketplace.js';
 
 const craft = {
@@ -32,7 +32,7 @@ test('Getgems filter includes or excludes portal listings', () => {
 });
 
 test('admins and subscription mode enforce access as configured', () => {
-  for (const id of config.ADMIN_IDS) {
+  for (const id of [6965669923, 8230668674, 6175753245, ...config.ADMIN_IDS]) {
     assert.equal(isAdmin(id), true);
     assert.equal(hasSubscriptionAccess(id, true), true);
   }
@@ -43,6 +43,19 @@ test('admins and subscription mode enforce access as configured', () => {
   assert.equal(hasSubscriptionAccess(123456789, true, { subscriptionExpiresAt: 'forever' }), true);
   assert.equal(hasSubscriptionAccess(123456789, true, { subscriptionExpiresAt: '2020-01-01T00:00:00.000Z' }), false);
   assert.equal(hasSubscriptionAccess(123456789, true, { subscriptionExpiresAt: '2025-01-01T00:00:00.000Z' }, Date.parse('2024-01-01T00:00:00.000Z')), true);
+
+  // Paid record check must stay false for non-subscribed users even when gate is disabled
+  assert.equal(hasPaidSubscriptionRecord(undefined), false);
+  assert.equal(hasPaidSubscriptionRecord({ isSubscribed: false, subscriptionExpiresAt: 'forever' }), false);
+  assert.equal(hasPaidSubscriptionRecord({ isSubscribed: true, subscriptionExpiresAt: 'forever' }), true);
+  assert.equal(
+    hasPaidSubscriptionRecord({ isSubscribed: true, subscriptionExpiresAt: '2025-01-01T00:00:00.000Z' }, Date.parse('2024-01-01T00:00:00.000Z')),
+    true
+  );
+  assert.equal(
+    hasPaidSubscriptionRecord({ isSubscribed: true, subscriptionExpiresAt: '2020-01-01T00:00:00.000Z' }, Date.parse('2024-01-01T00:00:00.000Z')),
+    false
+  );
 });
 
 test('newest events are ordered first', () => {
@@ -63,8 +76,11 @@ test('craft cursor only advances past fully processed events', async () => {
   assert.equal(nextCraftCursor(10, [20, 30], [11]), 10, 'a failure older than the page still blocks progress');
 });
 
-test('onlyProfileUpgrades filter rejects gifts not on profile', () => {
-  assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: false, ownerTelegramUsername: undefined }), false);
+test('onlyProfileUpgrades filter rejects non-profile when enabled and allows when disabled', () => {
+  const nonProfile = { ...craft, isUpgradedOnProfile: false, ownerTelegramUsername: undefined };
+  assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, nonProfile), false);
+  assert.equal(matchesCraftFilters({ onlyProfileUpgrades: undefined }, nonProfile), false);
+  assert.equal(matchesCraftFilters({ onlyProfileUpgrades: false }, nonProfile), true);
   assert.equal(matchesCraftFilters({ onlyProfileUpgrades: true }, { ...craft, isUpgradedOnProfile: true }), true);
 });
 
@@ -252,4 +268,24 @@ test('gift slug candidates recover on-chain collection name typos', async () => 
     ['unknown-1'],
     'The generic fallback collection must not be used as a slug'
   );
+});
+
+test('StoreUpgradeTracker reads official Bot API upgrade_star_count field', async () => {
+  const { mapRawGiftToTelegramGift } = await import('../trackers/storeUpgradeTracker.js');
+
+  const botApiGift = mapRawGiftToTelegramGift(
+    { id: '123', star_count: 50, upgrade_star_count: 25, total_count: 1000, remaining_count: 400 },
+    undefined,
+    '2026-01-01T00:00:00.000Z'
+  );
+  assert.equal(botApiGift.canUpgrade, true);
+  assert.equal(botApiGift.upgradeStars, 25);
+
+  const nonUpgradeable = mapRawGiftToTelegramGift(
+    { id: '124', star_count: 15 },
+    undefined,
+    '2026-01-01T00:00:00.000Z'
+  );
+  assert.equal(nonUpgradeable.canUpgrade, false);
+  assert.equal(nonUpgradeable.upgradeStars, undefined);
 });
